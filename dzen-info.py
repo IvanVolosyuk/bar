@@ -6,18 +6,26 @@ import sys
 import datetime
 import thread
 
+screen_width = 1000
+try:
+  screen_width = int(sys.argv[1])
+except:
+  pass
+
+
 height = 22
-show_battery = True
+show_battery = False
 show_cpugraph = True
 show_clock = True
 
 padding = 4
 battery_width = 120
 cpugraph_width = 75
+clock_width = 60
 
-battery_xpos = 1090
-cpugraph_xpos = battery_xpos + battery_width + padding
-clock_xpos = cpugraph_xpos + cpugraph_width + padding
+clock_xpos = screen_width - clock_width - 14
+cpugraph_xpos = clock_xpos - cpugraph_width - padding
+battery_xpos = cpugraph_xpos - battery_width - padding
 
 def red(val):
   return "^fg(red)%s^fg()" % val
@@ -113,7 +121,9 @@ def file_reader(filename):
   f.close()
   return values
 
-bat_max_capacity = float(file_reader('/proc/acpi/battery/BAT0/info')['design capacity'])
+if show_battery:
+  global bat_max_capacity
+  bat_max_capacity = float(file_reader('/proc/acpi/battery/BAT0/info')['design capacity'])
   
 
 def battery():
@@ -143,7 +153,7 @@ def battery():
 def clock():
   """Draw clock in 24H mode: "22:24"."""
   tm = datetime.datetime.now()
-  res = frame(xpos = clock_xpos, cmd="clock.sh", width=60, offset=5)
+  res = frame(xpos = clock_xpos, cmd="clock.sh", width=clock_width, offset=5)
   res += color("#C7AE86", "%02d:%02d" % (tm.hour, tm.minute))
   return res
 
@@ -155,10 +165,13 @@ def input_reader():
   global titlebar
   while True:
     line = sys.stdin.readline()
+    if line == '':
+      break
     titlebar = "^pa(10)^p()%s" % color('black', line.strip())
     print titlebar + sysinfo
     sys.stdout.flush()
-  sys.exit(1)
+  titlebar = None
+  sys.exit(0)
 
 thread.start_new_thread(input_reader, ())
 
@@ -169,11 +182,15 @@ def draw():
   if show_battery: sysinfo += battery()
   if show_cpugraph: sysinfo += cpugraph()
   if show_clock: sysinfo += clock()
+
   print titlebar + sysinfo
   sys.stdout.flush()
-  
+
 
 while True:
+  if titlebar is None:
+    break
+
+  draw()
   t = time.time()
   time.sleep(2 - math.modf(t)[0])
-  draw()
