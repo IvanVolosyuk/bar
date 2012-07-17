@@ -227,13 +227,15 @@ myMouseBindings (XConfig {XMonad.modMask = modm}) = M.fromList $
 -- The available layouts.  Note that each layout is separated by |||,
 -- which denotes layout choice.
 --
+--
 
-myLayout = avoidStruts $ reflectHoriz $ tiled ||| Mirror tiled ||| noBorders (Full)
---                                            ||| threeCol
+myLayout = avoidStruts $ reflectHoriz $ tiled ||| mirrorTiled ||| noBorders (Full)
+-- ||| threeCol
   where
      -- default tiling algorithm partitions the screen into two panes
      tiled   = windowNavigation (ResizableTall nmaster delta ratio [])
-     threeCol = windowNavigation (ThreeCol nmaster delta ratio)
+     mirrorTiled = windowNavigation . Mirror $ ResizableTall nmaster delta ratio []
+     threeCol = windowNavigation . Mirror $ ThreeCol nmaster delta ratio
 
      -- The default number of windows in the master pane
      nmaster = 1

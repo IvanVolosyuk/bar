@@ -23,10 +23,10 @@ padding = 4
 --          Object    refresh (sec)  position
 layout = [ (emptySpace,      never,  L 10),
            (genTitle,            0,  L 0),
-           (batteryGraph,      300,  R 40),
-           (mem,                30,  R 30),
+--         (batteryGraph,      300,  R 40),
+           (mem,                60,  R 70),
            (cpu,                 2,  R 70),
-           (battery,             5,  R 120),
+--         (battery,             5,  R 120),
            (clock,               2,  R 60)
          ]
 
