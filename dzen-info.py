@@ -14,7 +14,7 @@ except:
 
 
 height = 22
-show_battery = False
+show_battery = True
 show_cpugraph = True
 show_clock = True
 

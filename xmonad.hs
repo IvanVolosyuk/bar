@@ -38,6 +38,7 @@ import XMonad.Util.WindowProperties (getProp32)
 import Data.List (isPrefixOf)
 
 import XMonad.Hooks.ManageHelpers
+import XMonad.Hooks.ManageDocks
 
 
 -- The preferred terminal program, which is used in a binding below and by
@@ -276,7 +277,7 @@ myManageHook = manageDocks <+> composeAll
 -- return (All True) if the default handler is to be run afterwards. To
 -- combine event hooks use mappend or mconcat from Data.Monoid.
 --
-myEventHook = mempty
+myEventHook = mempty -- docksEventHook
 
 
 icon name = "^i(icons/"++name++".xpm) "
