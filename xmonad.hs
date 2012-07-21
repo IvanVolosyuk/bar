@@ -40,6 +40,16 @@ import Data.List (isPrefixOf)
 import XMonad.Hooks.ManageHelpers
 import XMonad.Hooks.ManageDocks
 
+import XMonad.Layout.Drawer
+import XMonad.Layout.DecorationMadness
+import XMonad.Layout.MouseResizableTile
+
+
+import XMonad.Hooks.UrgencyHook
+import qualified XMonad.StackSet as S
+import XMonad.Util.NamedWindows
+import System.Process
+
 
 -- The preferred terminal program, which is used in a binding below and by
 -- certain contrib modules.
@@ -52,7 +62,7 @@ myFocusFollowsMouse = True
 
 -- Width of the window border in pixels.
 --
-myBorderWidth   = 5
+myBorderWidth   = 2
 
 -- modMask lets you specify which modkey you want to use. The default
 -- is mod1Mask ("left alt").  You may also consider using mod3Mask
@@ -227,7 +237,6 @@ myMouseBindings (XConfig {XMonad.modMask = modm}) = M.fromList $
 -- The available layouts.  Note that each layout is separated by |||,
 -- which denotes layout choice.
 --
---
 
 myLayout = avoidStruts $ reflectHoriz $ tiled ||| mirrorTiled ||| noBorders (Full)
 -- ||| threeCol
@@ -235,7 +244,9 @@ myLayout = avoidStruts $ reflectHoriz $ tiled ||| mirrorTiled ||| noBorders (Ful
      -- default tiling algorithm partitions the screen into two panes
      tiled   = windowNavigation (ResizableTall nmaster delta ratio [])
      mirrorTiled = windowNavigation . Mirror $ ResizableTall nmaster delta ratio []
+     exp = mirrorTallSimpleDecoResizable
      threeCol = windowNavigation . Mirror $ ThreeCol nmaster delta ratio
+     drawer = simpleDrawer 0.01 0.3 (ClassName "Konsole" `Or` ClassName "Gvim")
 
      -- The default number of windows in the master pane
      nmaster = 1
@@ -282,11 +293,12 @@ myManageHook = manageDocks <+> composeAll
 myEventHook = mempty -- docksEventHook
 
 
-icon name = "^i(icons/"++name++".xpm) "
+-- icon name = "^i(icons/"++name++".xpm) "
  
-myAddIcon s
-  | "konsole" `isPrefixOf` s = icon("konsole") ++ s
-  | otherwise = icon("konsole") ++ s
+myAddIcon iconName s = "{" ++ iconName ++ "}" ++ s
+
+getIconData Nothing = return ""
+getIconData (Just winid) = return winid
 
 ------------------------------------------------------------------------
 -- Status bars and logging
@@ -294,9 +306,21 @@ myAddIcon s
 -- Perform an arbitrary action on each internal state change or X event.
 -- See the 'XMonad.Hooks.DynamicLog' extension for examples.
 --
-myLogHook xmproc = dynamicLogWithPP $ dzenPP
+myLogHook xmproc = do
+    winset <- gets windowset
+    urgents <- readUrgents
+    sort' <- ppSort dzenPP
+    -- layout description
+    let ld = description . S.layout . S.workspace . S.current $ winset
+    -- workspace list
+    let ws = pprWindowSet sort' urgents dzenPP winset
+    -- window title
+    let winid = S.peek winset >>= return . show
+    iconData <- getIconData winid
+
+    dynamicLogWithPP $ dzenPP
                        { ppOutput = hPutStrLn xmproc
-                       , ppTitle = dzenColor "#202020" "" . myAddIcon . shorten 150
+                       , ppTitle = dzenColor "#202020" "" . myAddIcon iconData . shorten 150
                        , ppLayout = \x -> "  "
                        }
 
@@ -346,3 +370,35 @@ defaults xmproc = defaultConfig {
         logHook            = myLogHook xmproc,
         startupHook        = myStartupHook
     }
+
+
+fullscreenEventHook :: Event -> X All
+fullscreenEventHook (ClientMessageEvent _ _ _ dpy win typ (action:dats)) = do
+  state <- getAtom "_NET_WM_STATE"
+  fullsc <- getAtom "_NET_WM_STATE_FULLSCREEN"
+  wstate <- fromMaybe [] `fmap` getProp32 state win
+
+  let isFull = fromIntegral fullsc `elem` wstate
+
+      -- Constants for the _NET_WM_STATE protocol:
+      remove = 0
+      add = 1
+      toggle = 2
+      ptype = 4 -- The atom property type for changeProperty
+      chWstate f = io $ changeProperty32 dpy win state ptype propModeReplace (f wstate)
+
+  when (typ == state && fi fullsc `elem` dats) $ do
+    when (action == add || (action == toggle && not isFull)) $ do
+      chWstate (fi fullsc:)
+      windows $ W.float win $ W.RationalRect 0 0 1 1
+    when (action == remove || (action == toggle && isFull)) $ do
+      chWstate $ delete (fi fullsc)
+      windows $ W.sink win
+
+  return $ All True
+
+  -- DLM: Added to resolve a few dependencies:
+  where fi :: (Integral a, Num b) => a -> b
+        fi = fromIntegral
+
+fullscreenEventHook _ = return $ All True

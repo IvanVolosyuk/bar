@@ -16,6 +16,9 @@ import System.Posix.Signals
 import Graphics.X11.Xlib
 import System.Posix.Process
 import System.Process
+import System.Directory (doesFileExist)
+import Xpm
+import Data.HashTable (hashString)
 
 height = 22
 padding = 4
@@ -23,10 +26,10 @@ padding = 4
 --          Object    refresh (sec)  position
 layout = [ (emptySpace,      never,  L 10),
            (genTitle,            0,  L 0),
---         (batteryGraph,      300,  R 40),
-           (mem,                60,  R 70),
-           (cpu,                 2,  R 70),
---         (battery,             5,  R 120),
+           (batteryGraph,      300,  R 40),
+           (battery,             5,  R 120),
+           (mem,                60,  R 25),
+           (cpu,                 2,  R 60),
            (clock,               2,  R 60)
          ]
 
@@ -85,7 +88,7 @@ staticMessage x size = do
 
 emptySpace = staticMessage ""
 exit _ = print "end of input" >> getProcessGroupID >>= signalProcessGroup softwareTermination >> return ""
-genTitle w = getLine `catch` exit >>= \x -> return (x, IOBox { exec = genTitle w })
+genTitle w = getLine `catch` exit >>= replaceIcon >>= \x -> return (x, IOBox { exec = genTitle w })
 
 frame2 cmd width offset = printf fmt cmd width height offset where
   fmt = "^ib(1)^fg(#181838)^ca(1,%s)^r(%dx%d)^ca()^p(%d)^fg()"
@@ -172,7 +175,7 @@ runLayout chan n refresh pos state = do
 initOneLayout chan pos n func refresh size = do
   (msg, state) <- func size
   sendLayout chan n pos msg
-  forkIO $ runLayout chan n refresh pos state
+  runLayout chan n refresh pos state
 
 initLayoutAll :: Chan (Int, String) -> Int -> Int
                  -> [(Int, (Int -> BoxIO, Int, Geometry))]
@@ -181,12 +184,12 @@ initLayoutAll chan offsetL offsetR [] = return (offsetL, offsetR)
 initLayoutAll chan offsetL offsetR ((n, (func, refresh, loc)) : xs) =
   case loc of
     L size -> do
-       initOneLayout chan offsetL n func refresh size
+       forkIO $ initOneLayout chan offsetL n func refresh size
        initLayoutAll chan (offsetL + size + padding) offsetR xs
     R size -> do
        (offsetL2, offsetR2) <- initLayoutAll chan offsetL offsetR xs
        let offsetR3 = offsetR2 - size - padding
-       initOneLayout chan offsetR3 n func refresh size
+       forkIO $ initOneLayout chan offsetR3 n func refresh size
        return (offsetL2, offsetR3)
 
 mergeTitle :: Chan (Int, String) -> StateT [String] IO ()
@@ -210,3 +213,18 @@ main = do
   forkProcess $ spawnTrayer $ screenWidth - offsetR + padding `div` 2
   let emptyTitle = take (length layout) . repeat $ ""
   evalStateT (mergeTitle chan) emptyTitle
+
+
+getWinId s = 
+  (l,w,r) where
+    (l, (_:xs)) = break (=='{') s
+    (w, (_:r)) = break (=='}') xs
+
+replaceIcon title = do
+  let (l,winid,r) = getWinId title
+  (_,iconRaw,_) <- readProcessWithExitCode "geticon" [winid] ""
+  let iconXpm = formatXPM iconRaw
+  let iconName = printf "icons/i%d.xpm" . abs .hashString $ iconRaw
+  exist <- doesFileExist iconName
+  if not exist then writeFile iconName iconXpm else return ()
+  return $ l ++ "^i(" ++ iconName ++ ") " ++ r

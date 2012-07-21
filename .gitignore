@@ -1,3 +1,5 @@
 *.o
 *.hi
 dzen
+icons/i*
+geticon

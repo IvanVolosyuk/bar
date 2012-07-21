@@ -1,4 +1,4 @@
 #!/bin/bash
 
 $(dirname $0)/tray.sh &
-exec xmonad
+exec /home/vol/opt/bin/xmonad
