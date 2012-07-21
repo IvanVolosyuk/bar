@@ -84,8 +84,8 @@ myWorkspaces    = ["1","2","3","4","5","6","7","8","9"]
 
 -- Border colors for unfocused and focused windows, respectively.
 --
-myNormalBorderColor  = "#c0c000"
-myFocusedBorderColor = "#4040ff"
+myNormalBorderColor  = "#000000"
+myFocusedBorderColor = "#FF0000"
 
 ------------------------------------------------------------------------
 -- Key bindings. Add, modify or remove key bindings here.
@@ -117,10 +117,10 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm,               xK_Tab   ), windows W.focusDown)
 
     -- Move focus to the next window
-    , ((modm,               xK_j     ), windows W.focusDown)
+    , ((modm,                xK_j     ), windows W.focusDown)
 
     -- Move focus to the previous window
-    , ((modm,               xK_k     ), windows W.focusUp  )
+    , ((modm,                xK_k     ), windows W.focusUp  )
 
     -- Move focus to the master window
     , ((modm,               xK_m     ), windows W.focusMaster  )
@@ -187,10 +187,10 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm,                 xK_Right), sendMessage $ Go L)
     , ((modm,                 xK_Up   ), sendMessage $ Go U)
     , ((modm,                 xK_Down ), sendMessage $ Go D)
-    , ((modm .|. controlMask, xK_Left ), sendMessage $ Swap R)
-    , ((modm .|. controlMask, xK_Right), sendMessage $ Swap L)
-    , ((modm .|. controlMask, xK_Up   ), sendMessage $ Swap U)
-    , ((modm .|. controlMask, xK_Down ), sendMessage $ Swap D)
+    , ((modm .|. shiftMask,   xK_Left ), sendMessage $ Swap R)
+    , ((modm .|. shiftMask,   xK_Right), sendMessage $ Swap L)
+    , ((modm .|. shiftMask,   xK_Up   ), sendMessage $ Swap U)
+    , ((modm .|. shiftMask,   xK_Down ), sendMessage $ Swap D)
     , ((mod1Mask, xK_F2), spawn "gmrun")
     , ((mod1Mask, xK_F4), kill)
     , ((mod4Mask, xK_F4), kill)
@@ -238,15 +238,14 @@ myMouseBindings (XConfig {XMonad.modMask = modm}) = M.fromList $
 -- which denotes layout choice.
 --
 
-myLayout = avoidStruts $ reflectHoriz $ tiled ||| mirrorTiled ||| noBorders (Full)
+myLayout = avoidStruts $ reflectHoriz $ configurableNavigation noNavigateBorders $ layouts
 -- ||| threeCol
   where
-     -- default tiling algorithm partitions the screen into two panes
-     tiled   = windowNavigation (ResizableTall nmaster delta ratio [])
-     mirrorTiled = windowNavigation . Mirror $ ResizableTall nmaster delta ratio []
-     exp = mirrorTallSimpleDecoResizable
-     threeCol = windowNavigation . Mirror $ ThreeCol nmaster delta ratio
-     drawer = simpleDrawer 0.01 0.3 (ClassName "Konsole" `Or` ClassName "Gvim")
+     layouts = tiled ||| mirrorTiled ||| noBorders (Full)
+
+     tiled = ResizableTall nmaster delta ratio []
+     mirrorTiled = Mirror $ ResizableTall nmaster delta ratio []
+     threeCol = Mirror $ ThreeCol nmaster delta ratio
 
      -- The default number of windows in the master pane
      nmaster = 1
