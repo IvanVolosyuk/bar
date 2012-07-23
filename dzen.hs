@@ -19,7 +19,6 @@ import System.Process
 import System.Directory (doesFileExist)
 import Xpm
 import Data.HashTable (hashString)
-import Data.String.Utils
 
 height = 22
 padding = 4
@@ -64,6 +63,16 @@ bar :: Int -> String
   dzenColor = printf "^fg(%s)%s^fg()"
   dzenBar h = printf "^pa(;%d)^r(1x%d)" (height-h + 1) (h::Int)
 
+split :: Char -> String -> [String]
+split ch s =  case dropWhile (==ch) s of
+  "" -> []
+  s' -> word : split ch s''
+    where (word, s'') = break (==ch) s'
+
+strip :: String -> String
+strip s = reverse . dropWhile p . reverse . dropWhile p $ s where
+  p = (==' ')
+
 updateGraph samples sample = newSamples where
   newSamples = map (\(n,o) -> o++[n]) $ zip sample $ map (drop 1) samples
 
@@ -77,7 +86,7 @@ getCpuData = readFile "/proc/stat" >>= return . map(read) . words . head . lines
 readKeyValueFile pp filename = readFile filename >>= return . makeMap where
   makeMap l = fromList $ map parseLine . lines $ l
   parseLine l = (strip k, pp . words $ v) where
-     (k,v) = case split ":" l of
+     (k,v) = case split ':' l of
        k':v':_ -> (k',v')
        otherwise -> ("", "")
 
