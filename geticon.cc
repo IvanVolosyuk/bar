@@ -287,9 +287,7 @@ void dumpIcon(Window win) {
     n -= 2 + npixels;
     pixels += 4 + npixels * 2;
 
-    if (match.width == 0) {
-      match = icon;
-    } else if (abs(icon.width - 23) < abs(match.width - 23)) {
+    if (icon.width > match.width) {
       match = icon;
     }
   }
