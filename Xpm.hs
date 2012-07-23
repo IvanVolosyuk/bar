@@ -14,7 +14,7 @@ import Numeric
 bgColor = "#BEBEBE"
 
 xpm0 = "/* XPM */"
-xpm1 = "static char *konsole[] = {" 
+xpm1 = "static char *konsole[] = {"
 xpm2 = "/* columns rows colors chars-per-pixel */"
 xpm3 w colors charPerPixel = printf "\"%d %d %d %d\"," w w colors charPerPixel
 xpm4 = "/* pixels */"
@@ -40,7 +40,7 @@ blend as (cs,bs) = let [a,c,b] = map (fst . head . readHex) [as,cs,bs] in
                    printf "%02X" res
  
 convertColor :: String -> String
-convertColor c = 
+convertColor c =
   let rgba = zip (chunksOf 2 c) (chunksOf 2 $ tail bgColor ++ "00") in
   let ((a,_) : bgr) = reverse rgba in
   concat . map (blend a) . reverse $ bgr
