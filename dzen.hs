@@ -254,7 +254,7 @@ main = do
   evalStateT (mergeTitle chan) emptyTitle
 
 
-getWinId s = 
+getWinId s =
   (l,w,r) where
     (l, (_:xs)) = break (=='{') s
     (w, (_:r)) = break (=='}') xs
@@ -262,7 +262,7 @@ getWinId s =
 replaceIcon title = do
   let (l,winid,r) = getWinId title
   (_,iconRaw,_) <- readProcessWithExitCode "geticon" [winid] ""
-  let iconXpm = formatXPM iconRaw
+  let iconXpm = formatXPM . downscaleRawImage 16 $ iconRaw
   let iconName = printf "icons/i%d.xpm" . abs .hashString $ iconRaw
   exist <- doesFileExist iconName
   if not exist then writeFile iconName iconXpm else return ()

@@ -1,6 +1,9 @@
 
 module Xpm (
-  formatXPM
+  formatXPM,
+  scaleRawImage,
+  downscaleRawImage,
+  scale
   ) where
 
 import IO
@@ -44,10 +47,13 @@ convertColor c =
   let rgba = zip (chunksOf 2 c) (chunksOf 2 $ tail bgColor ++ "00") in
   let ((a,_) : bgr) = reverse rgba in
   concat . map (blend a) . reverse $ bgr
+
+
+imageWidth text = truncate . sqrt $ (fromIntegral . length $ text) / 8
  
 formatXPM :: String -> String
 formatXPM text = unlines [ xpm0, xpm1, xpm2, meta, colors, picture, "};" ] where
-  width = truncate . sqrt $ (fromIntegral . length $ text) / 8 :: Int
+  width = imageWidth text
   colorSet = S.fromList $ chunksOf 8 text
   charsPerPixel = if (S.size colorSet) > (length symbols) then 2 else 1 :: Int
   colorMapList = zip (S.toList colorSet) (colorGen charsPerPixel "")
@@ -57,3 +63,26 @@ formatXPM text = unlines [ xpm0, xpm1, xpm2, meta, colors, picture, "};" ] where
   colorMap = M.fromList colorMapList
   textConv = concat . map (colorMap !) $ chunksOf 8 text
   picture = join ",\n" $ map (printf "\"%s\"") $ chunksOf (width * charsPerPixel) textConv
+
+scale :: Int -> [a] -> [a]
+scale newsize ar = pick newsize newsize size ar where
+  size = length ar
+  pick acc newsize size [] = []
+  pick acc newsize size (x:xs) =
+    if acc >= size
+    then (x : pick (acc - size) newsize size (x:xs))
+    else pick (acc + newsize) newsize size xs
+
+
+downscaleRawImage :: Int -> String -> String
+downscaleRawImage sz text =
+  let width = imageWidth text in
+  if width > sz
+  then scaleRawImage sz text
+  else text
+
+scaleRawImage :: Int -> String -> String
+scaleRawImage sz text = newtext where
+  width = imageWidth text
+  newtext = concat . scale sz . (map scaleLine) . chunksOf (8 * width) $ text
+  scaleLine = concat . scale sz . (chunksOf 8)
