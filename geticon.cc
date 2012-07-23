@@ -42,7 +42,7 @@ string getName(Window win) {
   unsigned char *prop_return;
 
   int res = XGetWindowProperty(dpy, win, XA_WM_NAME, 0, 4096, false, AnyPropertyType, &propType,
-		  &format, &nitems_return, &bytes_after_return, &prop_return);
+                               &format, &nitems_return, &bytes_after_return, &prop_return);
 
   if (res != Success) {
      fprintf(stderr, "Name: ???\n");
@@ -70,21 +70,21 @@ typedef struct {
 } pixel_t;
 
 /* A picture. */
-    
+
 typedef struct  {
     pixel_t *pixels;
     size_t width;
     size_t height;
 } bitmap_t;
-    
-/* Given "bitmap", this returns the pixel of bitmap at the point 
+
+/* Given "bitmap", this returns the pixel of bitmap at the point
    ("x", "y"). */
 
 static pixel_t * pixel_at (bitmap_t * bitmap, int x, int y)
 {
     return bitmap->pixels + (bitmap->width * y + x) * 2;
 }
-    
+
 /* Write "bitmap" to a PNG file specified by "path"; returns 0 on
    success, non-zero on error. */
 
@@ -105,7 +105,7 @@ static int save_png_to_file (bitmap_t *bitmap, const char *path)
     */
     int pixel_size = 4;
     int depth = 8;
-    
+
     fp = fopen (path, "wb");
     if (! fp) {
         goto fopen_failed;
@@ -115,18 +115,18 @@ static int save_png_to_file (bitmap_t *bitmap, const char *path)
     if (png_ptr == NULL) {
         goto png_create_write_struct_failed;
     }
-    
+
     info_ptr = png_create_info_struct (png_ptr);
     if (info_ptr == NULL) {
         goto png_create_info_struct_failed;
     }
-    
+
     /* Set up error handling. */
 
     if (setjmp (png_jmpbuf (png_ptr))) {
         goto png_failure;
     }
-    
+
     /* Set image attributes. */
 
     png_set_IHDR (png_ptr,
@@ -138,7 +138,7 @@ static int save_png_to_file (bitmap_t *bitmap, const char *path)
                   PNG_INTERLACE_NONE,
                   PNG_COMPRESSION_TYPE_DEFAULT,
                   PNG_FILTER_TYPE_DEFAULT);
-    
+
     /* Initialize rows of PNG. */
 
     row_pointers = (png_byte**) png_malloc (png_ptr, bitmap->height * sizeof (png_byte *));
@@ -154,7 +154,7 @@ static int save_png_to_file (bitmap_t *bitmap, const char *path)
             *row++ = pixel->alpha;
         }
     }
-    
+
     /* Write the image data to "fp". */
 
     png_init_io (png_ptr, fp);
@@ -165,12 +165,12 @@ static int save_png_to_file (bitmap_t *bitmap, const char *path)
        "status" to a value which indicates success. */
 
     status = 0;
-    
+
     for (y = 0; y < bitmap->height; y++) {
         png_free (png_ptr, row_pointers[y]);
     }
     png_free (png_ptr, row_pointers);
-    
+
  png_failure:
  png_create_info_struct_failed:
     png_destroy_write_struct (&png_ptr, &info_ptr);
@@ -188,7 +188,7 @@ void queryWindow(int i, Window win) {
   unsigned char *prop_return;
 
   int res = XGetWindowProperty(dpy, win, iconAtom, 0, 1000000, false, AnyPropertyType, &propType,
-		  &format, &nitems_return, &bytes_after_return, &prop_return); // FIXME: cleanup
+                               &format, &nitems_return, &bytes_after_return, &prop_return); // FIXME: cleanup
   fprintf(stderr, "res = %d\n", res);
   fprintf(stderr, "format = %d\n", format);
   fprintf(stderr, "nitems_return = %ld\n", nitems_return);
@@ -248,7 +248,7 @@ void dumpIcon(Window win) {
   unsigned char *prop_return;
 
   int res = XGetWindowProperty(dpy, win, iconAtom, 0, 1000000, false, AnyPropertyType, &propType,
-		  &format, &nitems_return, &bytes_after_return, &prop_return);
+                               &format, &nitems_return, &bytes_after_return, &prop_return);
   fprintf(stderr, "res = %d\n", res);
   fprintf(stderr, "format = %d\n", format);
   fprintf(stderr, "nitems_return = %ld\n", nitems_return);
@@ -327,7 +327,7 @@ int main(int argc, char **argv) {
   unsigned int nchildren;
 
   Status status = XQueryTree(dpy, w, &root_return, &parent, &children, &nchildren);
-  
+
   fprintf(stderr, "Num children: %d\n", nchildren);
   for (int i = 0; i < nchildren; i++) {
     fprintf(stderr, "** Name: %s\n", getName(children[i]).c_str());
