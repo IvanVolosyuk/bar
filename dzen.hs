@@ -27,6 +27,7 @@ cpuColorTable = ["#007F00", "#7F0000", "#600060", "#0000FF"]
 batteryColorTable = ["#303060"]
 memColorTable = ["#007F00", "#FF0000", "#0000FF"]
 netColorTable = ["#0000FF", graphBackgroundColor, "#00FF00"]
+netSilenceThreshold = 100
 
 --          Object    refresh (sec)  position
 layout= [ (emptySpace,      never,  L 10),
@@ -149,8 +150,8 @@ net dev width = do
       return ((showGraph netColorTable "net.sh" newGraph), IOBox { exec = net' dev width newGraph newNetState})
 
 makeNetSample dev input = map (makeLine total) values where
-  inbound = log $ (fromIntegral $ input !! 0) / 100 + 1 :: Float
-  outbound = log $ (fromIntegral $ input !! 8) / 100 + 1 :: Float
+  inbound = log $ (fromIntegral $ input !! 0) / netSilenceThreshold + 1
+  outbound = log $ (fromIntegral $ input !! 8) / netSilenceThreshold + 1
   total' = max 22 (inbound + outbound)
   total = truncate total'
   values = map truncate [total', total' - outbound, inbound] :: [Int]
