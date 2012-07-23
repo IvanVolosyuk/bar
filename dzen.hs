@@ -19,26 +19,35 @@ import System.Process
 import System.Directory (doesFileExist)
 import Xpm
 import Data.HashTable (hashString)
+import Data.String.Utils
 
 height = 22
 padding = 4
+graphBackgroundColor = "#181838"
+cpuColorTable = ["#007F00", "#7F0000", "#600060", "#0000FF"]
+batteryColorTable = ["#303060"]
+memColorTable = ["#007F00", "#FF0000", "#0000FF"]
+netColorTable = ["#0000FF", graphBackgroundColor, "#00FF00"]
 
 --          Object    refresh (sec)  position
-layout = [ (emptySpace,      never,  L 10),
-           (genTitle,            0,  L 0),
-           (batteryGraph,      300,  R 40),
-           (battery,             5,  R 120),
-           (mem,                60,  R 25),
-           (cpu,                 2,  R 60),
-           (clock,               2,  R 60)
+layout= [ (emptySpace,      never,  L 10),
+          (genTitle,            0,  L 0),
+          (net "wlan0",         5,  R 20),
+          (net "eth0",          5,  R 20),
+       --   (batteryGraph,      300,  R 40),
+          (battery,             5,  R 120),
+          (mem,                60,  R 15),
+          (cpu,                 2,  R 60),
+          (clock,               2,  R 60)
          ]
+
+layout0 = [( net "wlan0", 5, L 2)]
 
 getScreenWidth = do
   x <- openDisplay ":0"
   return . fromIntegral . widthOfScreen . screenOfDisplay x $ defaultScreen x
 
 
-cpuColorTable = ["#007F00", "#7F0000", "#600060", "#0000FF"]
 debug = False
 
 move :: Int -> String
@@ -55,12 +64,6 @@ bar :: Int -> String
   dzenColor = printf "^fg(%s)%s^fg()"
   dzenBar h = printf "^pa(;%d)^r(1x%d)" (height-h + 1) (h::Int)
 
-split :: (Char -> Bool) -> String -> [String]
-split p s =  case dropWhile p s of
-  "" -> []
-  s' -> word : split p s''
-    where (word, s'') = break p s'
-
 updateGraph samples sample = newSamples where
   newSamples = map (\(n,o) -> o++[n]) $ zip sample $ map (drop 1) samples
 
@@ -71,10 +74,15 @@ makeLine total = bar . (`div` safe total) . (* height)
 
 getCpuData = readFile "/proc/stat" >>= return . map(read) . words . head . lines
 
-readBatteryFile filename = readFile filename >>= return . makeMap where
+readKeyValueFile pp filename = readFile filename >>= return . makeMap where
   makeMap l = fromList $ map parseLine . lines $ l
-  parseLine l = (k, head . words $ v) where
-     k:v:_ = split (==':') l
+  parseLine l = (strip k, pp . words $ v) where
+     (k,v) = case split ":" l of
+       k':v':_ -> (k',v')
+       otherwise -> ("", "")
+
+readBatteryFile = readKeyValueFile head
+readNetFile = readKeyValueFile $ map read
 
 newtype IOBox = IOBox { exec :: IO (String, IOBox) }
 data Geometry = L Int | R Int
@@ -90,13 +98,13 @@ emptySpace = staticMessage ""
 exit _ = print "end of input" >> getProcessGroupID >>= signalProcessGroup softwareTermination >> return ""
 genTitle w = getLine `catch` exit >>= replaceIcon >>= \x -> return (x, IOBox { exec = genTitle w })
 
-frame2 cmd width offset = printf fmt cmd width height offset where
-  fmt = "^ib(1)^fg(#181838)^ca(1,%s)^r(%dx%d)^ca()^p(%d)^fg()"
+frame2 cmd width offset = printf fmt graphBackgroundColor cmd width height offset where
+  fmt = "^ib(1)^fg(%s)^ca(1,%s)^r(%dx%d)^ca()^p(%d)^fg()"
 
-showGraph :: String -> Graph -> String
-showGraph cmd state = frame' ++ bars where
+showGraph :: [String] -> String -> Graph -> String
+showGraph colorTable cmd state = frame' ++ bars where
   frame' = frame2 cmd len (0::Int)
-  bars = concat . map showOneColor $ zip cpuColorTable $ state
+  bars = concat . map showOneColor $ zip colorTable state
   showOneColor (col, ar) = move(-len) ++ (color col $ concat $ ar)
   len = case state of (x:xs) -> length x
 
@@ -109,32 +117,36 @@ clock width = do
   let frame' = frame2 "clock.sh" width $ -width + padding
   return (frame' ++ clockDisplay, IOBox { exec = clock width })
 
-battery width = do
-  batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
-  battery' width $ read $ batteryInfo ! "design capacity" where
-    battery' width capacity = do
-        batteryState <- liftIO $ readBatteryFile "/proc/acpi/battery/BAT0/state"
-        let batteryFrame = frame2 "powertop.sh" width $ -width + padding
-        let rate = read $ batteryState ! "present rate" :: Int
-        let remainingCapacity = read $ batteryState ! "remaining capacity"
-        let (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
-        let percent = remainingCapacity * 100 `div` capacity
-        let info = case batteryState ! "charging state" of
-              "discharging" | rate /= 0 -> printf "%d%%(%02d:%02d)" percent h m
-              otherwise -> printf "%d%%C" percent
-        return ((batteryFrame ++ color "#C7AE86" info), IOBox { exec = battery' width capacity})
-
 mem width = do
   let zeroGraph = take 4 $ repeat $ take width $ repeat $ bar 0
   mem' width zeroGraph where
     mem' width graph = do
       memState <- liftIO $ readBatteryFile "/proc/meminfo"
       let newGraph = updateGraph graph $ makeMemSample memState
-      return ((showGraph "top.sh" newGraph), IOBox { exec = mem' width newGraph})
+      return ((showGraph memColorTable "top.sh" newGraph), IOBox { exec = mem' width newGraph})
 
 makeMemSample input = map (makeLine total) values where
   total:free:cached:active:[] = map (read . (input !)) ["MemTotal", "MemFree", "Cached", "Active"]
   values = [total - free, total - free - cached, active]
+
+net dev width = do
+  let zeroGraph = take 3 $ repeat $ take width $ repeat $ bar 0
+  netState <- liftIO $ readNetFile "/proc/net/dev"
+  net' dev width zeroGraph netState where
+    net' dev width graph netState = do
+      newNetState <- liftIO $ readNetFile "/proc/net/dev"
+      let netDelta = delta (newNetState ! dev) (netState ! dev)
+      let newGraph = updateGraph graph $ makeNetSample dev netDelta
+      return ((showGraph netColorTable "net.sh" newGraph), IOBox { exec = net' dev width newGraph newNetState})
+
+makeNetSample dev input = map (makeLine total) values where
+  inbound = log $ (fromIntegral $ input !! 0) / 100 + 1 :: Float
+  outbound = log $ (fromIntegral $ input !! 8) / 100 + 1 :: Float
+  total' = max 22 (inbound + outbound)
+  total = truncate total'
+  values = map truncate [total', total' - outbound, inbound] :: [Int]
+
+delta newar ar = map (\(n,o) -> n-o) $ zip newar ar
 
 cpu width = do
   let zeroGraph = take 3 $ repeat $ take width $ repeat $ bar 0
@@ -142,9 +154,9 @@ cpu width = do
   cpu' width zeroGraph procData where
     cpu' width graph procData = do
       newProcData <- liftIO $ getCpuData
-      let procDelta = map (\(n,o) -> n-o) $ zip newProcData procData
+      let procDelta = delta newProcData procData
       let newGraph = updateGraph graph $ makeCpuSample procDelta
-      return ((showGraph "top.sh" newGraph), IOBox { exec = cpu' width newGraph newProcData })
+      return ((showGraph cpuColorTable "top.sh" newGraph), IOBox { exec = cpu' width newGraph newProcData })
 
 makeCpuSample :: [Int] -> [String]
 makeCpuSample (_ :user:nice:sys:idle:io:tail) = map (makeLine total) values where
@@ -159,7 +171,24 @@ batteryGraph width = do
         batteryState <- liftIO $ readBatteryFile "/proc/acpi/battery/BAT0/state"
         let remainingCapacity = read $ batteryState ! "remaining capacity"
         let newGraph = updateGraph graph $ [makeLine capacity remainingCapacity]
-        return ((showGraph "top.sh" newGraph), IOBox { exec = batGr' width newGraph capacity })
+        return ((showGraph batteryColorTable "top.sh" newGraph), IOBox { exec = batGr' width newGraph capacity })
+
+battery width = do
+  battery' width where
+    battery' width = do
+        batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
+        let capacity = read $ batteryInfo ! "design capacity"
+        batteryState <- liftIO $ readBatteryFile "/proc/acpi/battery/BAT0/state"
+        let batteryFrame = frame2 "powertop.sh" width $ -width + padding
+        let rate = read $ batteryState ! "present rate" :: Int
+        let remainingCapacity = read $ batteryState ! "remaining capacity"
+        let (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
+        let percent = remainingCapacity * 100 `div` capacity
+        let info = case batteryState ! "charging state" of
+              "discharging" | rate /= 0 -> printf "%d%%(%02d:%02d)" percent h m
+              otherwise -> printf "%d%%C" percent
+        return ((batteryFrame ++ color "#C7AE86" info), IOBox { exec = battery' width})
+
 
 sec = 1000000
 never = 100000000 * sec
