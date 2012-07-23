@@ -27,7 +27,7 @@ cpuColorTable = ["#007F00", "#7F0000", "#600060", "#0000FF"]
 batteryColorTable = ["#303060"]
 memColorTable = ["#007F00", "#FF0000", "#0000FF"]
 netColorTable = ["#0000FF", graphBackgroundColor, "#00FF00"]
-netSilenceThreshold = 100
+netSilenceThreshold = 10000
 
 --          Object    refresh (sec)  position
 layout= [ (emptySpace,      never,  L 10),
