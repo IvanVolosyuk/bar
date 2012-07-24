@@ -40,7 +40,6 @@ import Data.List (isPrefixOf)
 import XMonad.Hooks.ManageHelpers
 import XMonad.Hooks.ManageDocks
 
-import XMonad.Layout.Drawer
 import XMonad.Layout.DecorationMadness
 import XMonad.Layout.MouseResizableTile
 

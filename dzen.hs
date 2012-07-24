@@ -74,6 +74,9 @@ strip :: String -> String
 strip s = reverse . dropWhile p . reverse . dropWhile p $ s where
   p = (==' ')
 
+split1 ch s = (x, tail xs) where
+  (x,xs) = break (==ch) s
+
 updateGraph samples sample = newSamples where
   newSamples = map (\(n,o) -> o++[n]) $ zip sample $ map (drop 1) samples
 
@@ -87,9 +90,7 @@ getCpuData = readFile "/proc/stat" >>= return . map(read) . words . head . lines
 readKeyValueFile pp filename = readFile filename >>= return . makeMap where
   makeMap l = fromList $ map parseLine . lines $ l
   parseLine l = (strip k, pp . words $ v) where
-     (k,v) = case split ':' l of
-       k':v':_ -> (k',v')
-       otherwise -> ("", "")
+     (k,v) = split1 ':' l
 
 readBatteryFile = readKeyValueFile head
 readNetFile = readKeyValueFile $ map read
@@ -246,6 +247,9 @@ spawnTrayer xpos = do
   return ()
 
 main = do
+  -- fd <- openFd "/tmp/log3.txt" WriteOnly Nothing defaultFileFlags
+  -- dupTo fd stdError
+  hSetBuffering stdin LineBuffering
   chan <- newChan :: IO (Chan (Int, String))
   screenWidth <- getScreenWidth
   (_, offsetR) <- initLayoutAll chan 0 (screenWidth + padding `div` 2) $ zip (enumFrom 0) layout
@@ -253,11 +257,9 @@ main = do
   let emptyTitle = take (length layout) . repeat $ ""
   evalStateT (mergeTitle chan) emptyTitle
 
-
-getWinId s =
-  (l,w,r) where
-    (l, (_:xs)) = break (=='{') s
-    (w, (_:r)) = break (=='}') xs
+getWinId s = (l, w, r) where
+  (l,xs) = split1 '{' s
+  (w,r) = split1 '}' xs
 
 replaceIcon title = do
   let (l,winid,r) = getWinId title

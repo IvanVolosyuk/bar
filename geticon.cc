@@ -253,7 +253,6 @@ void dumpIcon(Window win) {
   fprintf(stderr, "format = %d\n", format);
   fprintf(stderr, "nitems_return = %ld\n", nitems_return);
   fprintf(stderr, "bytes_after_return = %ld\n", bytes_after_return);
-  string name = getName(win);
 
   if (format != 32) {
     die("format = %d\n", format);
