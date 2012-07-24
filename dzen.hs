@@ -264,7 +264,7 @@ getWinId s = (l, w, r) where
 replaceIcon title = do
   let (l,winid,r) = getWinId title
   (_,iconRaw,_) <- readProcessWithExitCode "geticon" [winid] ""
-  let iconXpm = formatXPM iconRaw
+  let iconXpm = formatXPM . scaleRawImage 22 $ iconRaw
   let iconName = printf "icons/i%d.xpm" . abs .hashString $ iconRaw
   exist <- doesFileExist iconName
   if not exist then writeFile iconName iconXpm else return ()
