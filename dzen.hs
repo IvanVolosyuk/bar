@@ -263,9 +263,11 @@ getWinId s = (l, w, r) where
 
 replaceIcon title = do
   let (l,winid,r) = getWinId title
-  (_,iconRaw,_) <- readProcessWithExitCode "geticon" [winid] ""
-  let iconXpm = formatXPM . scaleRawImage 22 $ iconRaw
-      iconName = printf "icons/i%d.xpm" . abs .hashString $ iconRaw
-  exist <- doesFileExist iconName
-  if not exist then writeFile iconName iconXpm else return ()
-  return $ l ++ "^i(" ++ iconName ++ ") " ++ r
+  -- (_,iconRaw,_) <- readProcessWithExitCode "geticon" [winid] ""
+  -- let iconXpm = formatXPM . scaleRawImage 22 $ iconRaw
+  if winid == "" then return $ l ++ r else do
+    iconXpm <- getXpmIcon 22 $ read winid
+    let iconName = printf "icons/i%d.xpm" . abs .hashString $ iconXpm -- FIXME: use hash of raw data if possible?
+    exist <- doesFileExist iconName
+    if not exist then writeFile iconName iconXpm else return ()
+    return $ l ++ "^i(" ++ iconName ++ ") " ++ r
