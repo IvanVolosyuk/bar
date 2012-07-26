@@ -107,7 +107,6 @@ staticMessage x size = do
 
 emptySpace = staticMessage ""
 exit _ = print "end of input" >> getProcessGroupID >>= signalProcessGroup softwareTermination >> return ""
-genTitle w = getLine `catch` exit >>= replaceIcon >>= \x -> return (x, IOBox { exec = genTitle w })
 
 frame2 cmd width offset = printf fmt graphBackgroundColor cmd width height offset where
   fmt = "^ib(1)^fg(%s)^ca(1,%s)^r(%dx%d)^ca()^p(%d)^fg()"
@@ -185,20 +184,40 @@ batteryGraph width = do
         return ((showGraph batteryColorTable "top.sh" newGraph), IOBox { exec = batGr' width newGraph capacity })
 
 battery width = do
-  battery' width where
-    battery' width = do
-        batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
-        batteryState <- liftIO $ readBatteryFile "/proc/acpi/battery/BAT0/state"
-        let capacity = read $ batteryInfo ! "design capacity"
-            batteryFrame = frame2 "powertop.sh" width $ -width + padding
-            rate = read $ batteryState ! "present rate" :: Int
-            remainingCapacity = read $ batteryState ! "remaining capacity"
-            (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
-            percent = remainingCapacity * 100 `div` capacity
-            info = case batteryState ! "charging state" of
-              "discharging" | rate /= 0 -> printf "%d%%(%02d:%02d)" percent h m
-              otherwise -> printf "%d%%C" percent
-        return ((batteryFrame ++ color "#C7AE86" info), IOBox { exec = battery' width})
+  batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
+  batteryState <- liftIO $ readBatteryFile "/proc/acpi/battery/BAT0/state"
+  let capacity = read $ batteryInfo ! "design capacity"
+      batteryFrame = frame2 "powertop.sh" width $ -width + padding
+      rate = read $ batteryState ! "present rate" :: Int
+      remainingCapacity = read $ batteryState ! "remaining capacity"
+      (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
+      percent = remainingCapacity * 100 `div` capacity
+      info = case batteryState ! "charging state" of
+        "discharging" | rate /= 0 -> printf "%d%%(%02d:%02d)" percent h m
+        otherwise -> printf "%d%%C" percent
+  return ((batteryFrame ++ color "#C7AE86" info), IOBox { exec = battery width})
+
+getWinId s = (l, w, r) where
+  (l,xs) = split1 '{' s
+  (w,r) = split1 '}' xs
+
+replaceIcon :: IconState -> String -> IO (String, IconState)
+replaceIcon st title = do
+  let (l,winid,r) = getWinId title
+  if winid == "" then return ((l ++ r), st) else do
+    let win = read winid
+    (iconName, newState) <- runStateT (getIconPath win) st
+    let newTitle = l ++ "^i(" ++ iconName ++ ") " ++ r
+    return (newTitle, newState)
+
+genTitle :: Int -> BoxIO
+genTitle w = do
+  st0 <- initState height
+  genTitle' st0 w where
+    genTitle' state w = do
+      s1 <- getLine `catch` exit
+      (s2, newState) <- replaceIcon state s1
+      return (s2, IOBox { exec = genTitle' newState w })
 
 
 sec = 1000000
@@ -257,17 +276,3 @@ main = do
   let emptyTitle = take (length layout) . repeat $ ""
   evalStateT (mergeTitle chan) emptyTitle
 
-getWinId s = (l, w, r) where
-  (l,xs) = split1 '{' s
-  (w,r) = split1 '}' xs
-
-replaceIcon title = do
-  let (l,winid,r) = getWinId title
-  -- (_,iconRaw,_) <- readProcessWithExitCode "geticon" [winid] ""
-  -- let iconXpm = formatXPM . scaleRawImage 22 $ iconRaw
-  if winid == "" then return $ l ++ r else do
-    iconXpm <- getXpmIcon 22 $ read winid
-    let iconName = printf "icons/i%d.xpm" . abs .hashString $ iconXpm -- FIXME: use hash of raw data if possible?
-    exist <- doesFileExist iconName
-    if not exist then writeFile iconName iconXpm else return ()
-    return $ l ++ "^i(" ++ iconName ++ ") " ++ r

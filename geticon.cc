@@ -239,6 +239,12 @@ void queryWindow(int i, Window win) {
   }
 }
 
+int errorHandler(Display *dpy, XErrorEvent *ev) {
+  printf("Error!\n");
+}
+
+typedef int (*errorHandlerPtr)(Display *dpy, XErrorEvent *ev);
+
 
 void dumpIcon(Window win) {
   Atom propType;
@@ -246,6 +252,8 @@ void dumpIcon(Window win) {
   unsigned long nitems_return;
   unsigned long bytes_after_return;
   unsigned char *prop_return;
+ 
+  errorHandlerPtr oldHandler = XSetErrorHandler(errorHandler);
 
   int res = XGetWindowProperty(dpy, win, iconAtom, 0, 1000000, false, AnyPropertyType, &propType,
                                &format, &nitems_return, &bytes_after_return, &prop_return);

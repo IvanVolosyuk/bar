@@ -5,11 +5,11 @@ module Xpm (
   scaleRawImage,
   downscaleRawImage,
   scale,
-  getIcon,
-  getIcons,
   Bitmap,
-  getXpmIcon,
-  chunksOf
+  chunksOf,
+  getIconPath,
+  initState,
+  IconState
   ) where
 
 import IO
@@ -18,7 +18,9 @@ import Text.Printf
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Map ((!))
+import Data.Maybe
 import Numeric
+import Control.Monad.State (StateT, get, put, liftIO)
 import System.Posix.DynamicLinker
 import Foreign.C.String
 import GHC.Ptr
@@ -28,12 +30,16 @@ import GHC.Word
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Marshal.Array (peekArray)
 import Foreign.Storable (peek)
+import Data.HashTable (hashString)
+import System.Directory (doesFileExist)
+
 foreign import ccall "dynamic" openDisplay__ :: FunPtr XOpenDisplayFunc -> XOpenDisplayFunc
 foreign import ccall "dynamic" closeDisplay__ :: FunPtr XCloseDisplayFunc -> XCloseDisplayFunc
 foreign import ccall "dynamic" setErrorHandler__ :: FunPtr XSetErrorHandlerFunc -> XSetErrorHandlerFunc
 foreign import ccall "dynamic" internAtom__ :: FunPtr XInternIconFunc -> XInternIconFunc
 foreign import ccall "dynamic" getWinProp__ :: FunPtr XGetWindowPropertyFunc -> XGetWindowPropertyFunc
 foreign import ccall "dynamic" free__ :: FunPtr XFreeFunc -> XFreeFunc
+foreign import ccall "wrapper" wrap :: XErrorHandler -> IO (FunPtr XErrorHandler)
 
 bgColor = "#BEBEBE"
 
@@ -108,10 +114,10 @@ scaleRawImage sz text = newtext where
   newtext = concat . scale sz . (map scaleLine) . chunksOf (8 * width) $ text
   scaleLine = concat . scale sz . (chunksOf 8)
 
-type XOpenDisplayFunc = CString -> IO (Ptr Int)
-type XInternIconFunc = Ptr Int -> CString -> CInt -> IO CInt
+type XOpenDisplayFunc = CString -> IO (Ptr CInt)
+type XInternIconFunc = Ptr CInt -> CString -> CInt -> IO CInt
 type XGetWindowPropertyFunc =
-     Ptr Int  -- Display* (dpy)
+     Ptr CInt  -- Display* (dpy)
      -> CInt -- Window w (argument)
      -> CInt -- Atom property (atom)
      -> CLLong -- long long offset (0)
@@ -126,43 +132,16 @@ type XGetWindowPropertyFunc =
      -> IO CInt
 type  XFreeFunc = Ptr Word8 -> IO ()
 type  XCloseFunc = Ptr Int -> IO ()
-type  XSetErrorHandlerFunc = FunPtr XCloseDisplayFunc -> IO (FunPtr XCloseDisplayFunc)
+type  XSetErrorHandlerFunc = FunPtr XErrorHandler -> IO (FunPtr XErrorHandler)
 type  XCloseDisplayFunc = Ptr Int ->IO ()
 
-getIconProperty win = withDL "libX11.so" [RTLD_NOW] $ \mod -> do
-   openDisplayPtr <- dlsym mod "XOpenDisplay"
-   closeDisplayPtr <- dlsym mod "XCloseDisplay"
-   setErrorHandlerPtr <- dlsym mod "XCloseDisplay"
-   internAtomPtr <- dlsym mod "XInternAtom"
-   getWinPropPtr <- dlsym mod "XGetWindowProperty"
-   freePtr <- dlsym mod "XFree"
-   let xOpenDisplay = openDisplay__ openDisplayPtr
-       xCloseDisplay = closeDisplay__ closeDisplayPtr
-       xSetErrorHandler = setErrorHandler__ setErrorHandlerPtr
-       xInternAtom = internAtom__ internAtomPtr
-       xGetWindowProperty = getWinProp__ getWinPropPtr
-       xFree = free__ freePtr
-   dpy <- withCString ":0" $ xOpenDisplay
-   --xSetErrorHandler closeDisplayPtr
-   atom <- withCString "_NET_WM_ICON" $ \iconAtomName -> xInternAtom dpy iconAtomName 0
-   -- print dpy
-   -- print atom
-   alloca $ \actualTypeReturn ->
-     alloca $ \actualFormatReturn ->
-       alloca $ \nitemsReturn ->
-         alloca $ \bytesAfterReturn ->
-           alloca $ \propReturn -> do
-             res <- xGetWindowProperty dpy win atom 0 1000000 0 0 actualTypeReturn
-                                       actualFormatReturn nitemsReturn bytesAfterReturn
-                                       propReturn
-             if res /= 0 then return . take 16 . repeat $ 0 else do
-               nitems <- peek nitemsReturn
-               let nbytes = fromIntegral $ nitems * 8
-               propPtr <- peek propReturn
-               prop <- peekArray nbytes propPtr
-               xFree propPtr
-               xCloseDisplay dpy
-               return prop
+type XErrorHandler = Ptr CInt -> Ptr CInt -> IO CInt
+
+errorHandler :: XErrorHandler
+errorHandler a b = do
+  print "X11 Error!"
+  let res = 0 :: CInt
+  return res
 
 data Bitmap a = Bitmap { width :: Int, height :: Int, pixels :: [a] } deriving (Show)
 
@@ -182,7 +161,6 @@ bestMatch sz (icon:icons) = bestMatch' sz icon icons where
     (xBigger, xBigEnough, yBigEnough) = (wx > wy, wx > sz, wy > sz)
     xBetter = (xBigger && not yBigEnough) || (yBigEnough && xBigEnough && not xBigger)
 
--- TODO: check that neither color nor bg swaped
 blend a1 a2 (v1, v2) = fromIntegral $ (a1' * v1' + a2' * v2') `div` 255 where
  [a1', a2', v1', v2'] = map fromIntegral [a1, a2, v1, v2]
 
@@ -193,19 +171,69 @@ setImageBackground txtBg (Bitmap w h px) = Bitmap w h newpx where
   bg = map (fst . head . readHex) . chunksOf 2 $ tail txtBg
   newpx = map (setBackground bg) px
 
-getIcons win = getIconProperty win >>= return . makeIconList
-               .  map (take 4) . chunksOf 8
-
-getIcon sz win = do
-  icons <- getIcons win
-  return . bestMatch sz $ icons
-  -- return . setImageBackground bgColor . bestMatch sz $ icons
-
 toTxtColors :: Bitmap [Word8] -> String
 toTxtColors (Bitmap w h px) = concat . conv $ px where
   conv [] = []
   conv (x:xs) = (concat . map (printf "%02X") $ x) : conv xs
 
-getXpmIcon sz win = do
-  i <- getIcon sz win
-  return . formatXPM . scaleRawImage sz . toTxtColors $ i
+data IconState = IconState { propFunc :: XGetWindowPropertyFunc
+                           , freeFunc :: XFreeFunc
+                           , dpy :: Ptr CInt
+                           , atom :: CInt
+                           , iconCache :: M.Map CInt String
+                           , iconSize :: Int
+                           }
+
+initState :: Int -> IO IconState
+initState sz = withDL "libX11.so" [RTLD_NOW] $ \mod -> do
+   openDisplayPtr <- dlsym mod "XOpenDisplay"
+   internAtomPtr <- dlsym mod "XInternAtom"
+   getWinPropPtr <- dlsym mod "XGetWindowProperty"
+   setErrorHandlerPtr <- dlsym mod "XSetErrorHandler"
+   freePtr <- dlsym mod "XFree"
+   let xOpenDisplay = openDisplay__ openDisplayPtr
+       xInternAtom = internAtom__ internAtomPtr
+       xGetWindowProperty = getWinProp__ getWinPropPtr
+       xSetErrorHandler = setErrorHandler__ setErrorHandlerPtr
+       xFree = free__ freePtr
+   dpy <- withCString ":0" $ xOpenDisplay
+   atom <- withCString "_NET_WM_ICON" $ \atomName -> xInternAtom dpy atomName 0
+   wrap errorHandler >>= xSetErrorHandler
+   return $ IconState xGetWindowProperty xFree dpy atom M.empty sz
+
+fetchIcon st win =
+  alloca $ \actualTypeReturn ->
+    alloca $ \actualFormatReturn ->
+      alloca $ \nitemsReturn ->
+        alloca $ \bytesAfterReturn ->
+          alloca $ \propReturn -> do
+            res <- (propFunc st) (dpy st) win (atom st) 0 1000000 0 0
+                   actualTypeReturn actualFormatReturn nitemsReturn
+                   bytesAfterReturn propReturn
+            nitems <- peek nitemsReturn
+            if res /= 0 || nitems == 0 then return Nothing else do
+              let nbytes = fromIntegral $ nitems * 8
+              propPtr <- peek propReturn
+              prop <- peekArray nbytes propPtr
+              (freeFunc st) propPtr
+              return . Just . makeIconList .  map (take 4) . chunksOf 8 $ prop
+
+getIconPath :: CInt -> StateT IconState IO String
+getIconPath win = do
+  st <- get
+  case M.lookup win (iconCache st) of
+    Just path -> return path
+    Nothing -> do
+      mbIcons <- liftIO $ fetchIcon st win
+      case mbIcons of
+        Nothing -> return "icons/default.xpm"
+        Just icons -> do
+          let icon = bestMatch (iconSize st) icons
+              xpm = formatXPM . scaleRawImage (iconSize st) . toTxtColors $ icon
+              -- TODO: hash before scaling
+              iconName = printf "icons/i%d.xpm" . abs .hashString $ xpm
+          exist <- liftIO $ doesFileExist iconName
+          if not exist then do liftIO $ writeFile iconName xpm else return ()
+          let cache = M.insert win iconName (iconCache st)
+          put st { iconCache = cache }
+          return iconName
