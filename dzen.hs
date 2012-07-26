@@ -123,9 +123,9 @@ clock width = do
   time <- liftIO getCurrentTime
   timezone <- liftIO getCurrentTimeZone
   let tod = localTimeOfDay $ utcToLocalTime timezone time
-  let (h,m) = (todHour tod, todMin tod)
-  let clockDisplay = color "#C7AE86" $ printf "%02d:%02d" h m
-  let frame' = frame2 "clock.sh" width $ -width + padding
+      (h,m) = (todHour tod, todMin tod)
+      clockDisplay = color "#C7AE86" $ printf "%02d:%02d" h m
+      frame' = frame2 "clock.sh" width $ -width + padding
   return (frame' ++ clockDisplay, IOBox { exec = clock width })
 
 mem width = do
@@ -147,7 +147,7 @@ net dev width = do
     net' dev width graph netState = do
       newNetState <- liftIO $ readNetFile "/proc/net/dev"
       let netDelta = delta (newNetState ! dev) (netState ! dev)
-      let newGraph = updateGraph graph $ makeNetSample dev netDelta
+          newGraph = updateGraph graph $ makeNetSample dev netDelta
       return ((showGraph netColorTable "net.sh" newGraph), IOBox { exec = net' dev width newGraph newNetState})
 
 makeNetSample dev input = map (makeLine total) values where
@@ -166,7 +166,7 @@ cpu width = do
     cpu' width graph procData = do
       newProcData <- liftIO $ getCpuData
       let procDelta = delta newProcData procData
-      let newGraph = updateGraph graph $ makeCpuSample procDelta
+          newGraph = updateGraph graph $ makeCpuSample procDelta
       return ((showGraph cpuColorTable "top.sh" newGraph), IOBox { exec = cpu' width newGraph newProcData })
 
 makeCpuSample :: [Int] -> [String]
@@ -181,21 +181,21 @@ batteryGraph width = do
     batGr' width graph capacity = do
         batteryState <- liftIO $ readBatteryFile "/proc/acpi/battery/BAT0/state"
         let remainingCapacity = read $ batteryState ! "remaining capacity"
-        let newGraph = updateGraph graph $ [makeLine capacity remainingCapacity]
+            newGraph = updateGraph graph $ [makeLine capacity remainingCapacity]
         return ((showGraph batteryColorTable "top.sh" newGraph), IOBox { exec = batGr' width newGraph capacity })
 
 battery width = do
   battery' width where
     battery' width = do
         batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
-        let capacity = read $ batteryInfo ! "design capacity"
         batteryState <- liftIO $ readBatteryFile "/proc/acpi/battery/BAT0/state"
-        let batteryFrame = frame2 "powertop.sh" width $ -width + padding
-        let rate = read $ batteryState ! "present rate" :: Int
-        let remainingCapacity = read $ batteryState ! "remaining capacity"
-        let (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
-        let percent = remainingCapacity * 100 `div` capacity
-        let info = case batteryState ! "charging state" of
+        let capacity = read $ batteryInfo ! "design capacity"
+            batteryFrame = frame2 "powertop.sh" width $ -width + padding
+            rate = read $ batteryState ! "present rate" :: Int
+            remainingCapacity = read $ batteryState ! "remaining capacity"
+            (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
+            percent = remainingCapacity * 100 `div` capacity
+            info = case batteryState ! "charging state" of
               "discharging" | rate /= 0 -> printf "%d%%(%02d:%02d)" percent h m
               otherwise -> printf "%d%%C" percent
         return ((batteryFrame ++ color "#C7AE86" info), IOBox { exec = battery' width})
@@ -265,7 +265,7 @@ replaceIcon title = do
   let (l,winid,r) = getWinId title
   (_,iconRaw,_) <- readProcessWithExitCode "geticon" [winid] ""
   let iconXpm = formatXPM . scaleRawImage 22 $ iconRaw
-  let iconName = printf "icons/i%d.xpm" . abs .hashString $ iconRaw
+      iconName = printf "icons/i%d.xpm" . abs .hashString $ iconRaw
   exist <- doesFileExist iconName
   if not exist then writeFile iconName iconXpm else return ()
   return $ l ++ "^i(" ++ iconName ++ ") " ++ r
