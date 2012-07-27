@@ -28,6 +28,8 @@ batteryColorTable = ["#303060"]
 memColorTable = ["#007F00", "#FF0000", "#0000FF"]
 netColorTable = ["#0000FF", graphBackgroundColor, "#00FF00"]
 netSilenceThreshold = 100
+trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
+             \ --widthtype request --height 22 --margin %d" rightMargin
 
 --          Object    refresh (sec)  position
 layout= [ (emptySpace,      never,  L 10),
@@ -74,7 +76,9 @@ strip :: String -> String
 strip s = reverse . dropWhile p . reverse . dropWhile p $ s where
   p = (==' ')
 
-split1 ch s = (x, tail xs) where
+split1 ch s = (x, safeTail xs) where
+  safeTail [] = []
+  safeTail (x:xs) = xs
   (x,xs) = break (==ch) s
 
 updateGraph samples sample = newSamples where
@@ -216,8 +220,12 @@ genTitle w = do
   genTitle' st0 w where
     genTitle' state w = do
       s1 <- getLine `catch` exit
-      (s2, newState) <- replaceIcon state s1
-      return (s2, IOBox { exec = genTitle' newState w })
+      ready <- hReady stdin
+      if ready
+        then genTitle' state w
+        else do
+          (s2, newState) <- replaceIcon state s1
+          return (s2, IOBox { exec = genTitle' newState w })
 
 
 sec = 1000000
@@ -261,9 +269,8 @@ mergeTitle chan = forever $ do
   put newTitle
 
 spawnTrayer xpos = do
-  system $ "trayer --expand false --edge top --align right " ++
-                    "--widthtype request --height 22 --margin " ++ (show xpos)
-  return ()
+  let prog : args = split ' ' $ trayerCmd xpos
+  executeFile prog True args Nothing
 
 main = do
   -- fd <- openFd "/tmp/log3.txt" WriteOnly Nothing defaultFileFlags
