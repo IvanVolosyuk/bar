@@ -5,12 +5,28 @@ module Xpm (
   Bitmap,
   chunksOf,
   getIconPath,
-  initState,
   IconState,
+  initState,
+  defaultIconConfig,
+  IconConfig,
+  postProcessing,
+  bgColor,
+  pickSize,
+  cacheIcon,
+  scaleNearest,
+  scaleLinear,
   Math,
   scale,
+  colorFilter,
+  black,
+  none,
+  setColor,
+  shift,
+  resize,
+  shadow,
   scale1D,
-  scale2D
+  scale2D,
+  with
   ) where
 
 import IO
@@ -47,7 +63,7 @@ background = "#BEBEBE"
 xpm0 = "/* XPM */"
 xpm1 = "static char *icon[] = {"
 xpm2 = "/* columns rows colors chars-per-pixel */"
-xpm3 w colors charPerPixel = printf "\"%d %d %d %d\"," w w colors charPerPixel
+xpm3 w h colors charPerPixel = printf "\"%d %d %d %d\"," w h colors charPerPixel
 xpm4 = "/* pixels */"
 symbols = " .XoO+@#$%&*=-;:>,<1234567890qwertyuipasdfghjklzxcvbnmMNBVCZASDFGHJKLPIUYTREWQ!~^/()_`'][{}|"
 
@@ -65,18 +81,19 @@ formatColor (col,ch) = printf "\"%s c #%s\"" ch col
 join sep [] = ""
 join sep (x:xs) = foldl (\x y ->  x++sep++y ) x xs
 
-formatXPM :: Int -> String -> String
-formatXPM width text = unlines [ xpm0, xpm1, xpm2, meta, colors, picture, "};" ] where
+formatXPM :: String -> Bitmap [Word8] -> String
+formatXPM bg (Bitmap width height px) = image where
+  image =  unlines [ xpm0, xpm1, xpm2, meta, colors, picture, "};" ]
+  text = toTxtColors . map (setBackground $ toColor bg) $ px
   colorSet = S.fromList $ chunksOf 6 text -- FIXME: repeated 7 lines below
   charsPerPixel = if (S.size colorSet) > (length symbols) then 2 else 1 :: Int
   colorMapList = zip (S.toList colorSet) (colorGen charsPerPixel "")
-  meta = xpm3 width (length colorMapList) charsPerPixel
+  meta = xpm3 width height (length colorMapList) charsPerPixel
   colorMapStrings = map formatColor colorMapList
   colors = join ",\n" $ colorMapStrings ++ [ xpm4 ]
   colorMap = M.fromList colorMapList
   textConv = concat . map (colorMap !) $ chunksOf 6 text
   picture = join ",\n" $ map (printf "\"%s\"") $ chunksOf (width * charsPerPixel) textConv
-
 
 type XOpenDisplayFunc = CString -> IO (Ptr CInt)
 type XInternIconFunc = Ptr CInt -> CString -> CInt -> IO CInt
@@ -131,21 +148,35 @@ blend a1 a2 (v1, v2) = fromIntegral $ (a1' * v1' + a2' * v2') `div` 255 where
 setBackground bg color = map (blend (255-a) a) . zip bg $ reverse bgr where
   (a:bgr) = reverse color
 
+onTop bg color = map (blend (255-a) a) $ zip bg color where
+  a = last color
+
 toColor str = map (fst . head . readHex) . chunksOf 2 $ tail str 
 
 toTxtColors :: [[Word8]] -> String
 toTxtColors = concat . map (concat . map (printf "%02X"))
+
+data IconConfig = IconConfig { pickSize :: Int
+                             , postProcessing :: Bitmap [Word8] -> Bitmap [Word8]
+                             , bgColor :: String
+                             , cacheIcon :: Bool
+                             }
 
 data IconState = IconState { propFunc :: XGetWindowPropertyFunc
                            , freeFunc :: XFreeFunc
                            , dpy :: Ptr CInt
                            , atom :: CInt
                            , iconCache :: M.Map CInt String
-                           , scaleSize :: Int
+                           , iconConfig :: IconConfig
                            }
 
-initState :: Int -> IO IconState
-initState sz = do
+defaultIconConfig = IconConfig {
+   pickSize=16, postProcessing=(scaleNearest 16), bgColor="#000000",
+   cacheIcon=True
+   }
+
+initState :: IconConfig -> IO IconState
+initState iconConfig = do
    mod <- dlopen "libX11.so" [RTLD_NOW]
    openDisplayPtr <- dlsym mod "XOpenDisplay"
    internAtomPtr <- dlsym mod "XInternAtom"
@@ -160,7 +191,7 @@ initState sz = do
    dpy <- withCString ":0" $ xOpenDisplay
    atom <- withCString "_NET_WM_ICON" $ \atomName -> xInternAtom dpy atomName 0
    wrap errorHandler >>= xSetErrorHandler
-   return $ IconState xGetWindowProperty xFree dpy atom M.empty sz
+   return $ IconState xGetWindowProperty xFree dpy atom M.empty iconConfig
 
 fastHash :: Ptr Word8 -> Int -> IO Int
 fastHash p sz = genHash where
@@ -195,9 +226,8 @@ fetchIcon st win =
               return $ Just (propPtr, nbytes)
 
 
-scaleSimple :: Int -> [a] -> [a]
-scaleSimple newsize ar = pick 0 newsize size ar where
-  size = length ar
+scaleSimple :: Int -> Int -> [a] -> [a]
+scaleSimple size newsize ar = pick newsize newsize size ar where
   pick acc newsize size [] = []
   pick acc newsize size (x:xs) =
     if acc >= size
@@ -236,31 +266,64 @@ instance (Math a) => Math [a] where
 scale1D newsize a = map (normalize size) . scale size newsize $ a where
   size = length a
 
-scale2D size newsize = concat . (normalize (size * size)) . scale size newsize . (map $ scale size newsize) . chunksOf size
+scale2D w h newsize = concat . (normalize (w * h)) . scale h newsize
+                   . (map $ scale w newsize) . chunksOf w
 
-scaleImage :: Int -> Int -> [[Word8]] -> [[Word8]]
-scaleImage width sz = concat . scaleSimple sz . (map $ scaleSimple sz) . chunksOf width
+scaleNearest :: Int -> Bitmap [Word8] -> Bitmap [Word8]
+scaleNearest sz (Bitmap w h px ) = Bitmap sz sz . concat 
+     . scaleSimple w sz . (map $ scaleSimple w sz) . chunksOf w $ px
 
+scaleLinear sz (Bitmap w h px) = Bitmap sz sz
+      . cast_w8 . scale2D w h sz . cast_int $ px
 
 cast_int :: [[Word8]] -> [[Int]]
-cast_w8 = map (map fromIntegral)
-
-cast_w8 :: [[Int]] -> [[Word8]]
 cast_int = map (map fromIntegral)
 
-{-scaleAndFilter :: Int -> [a] -> [a]
-scaleAndFilter newsize ar = pick newsize newsize size ar where
-  size = length ar
-  pick acc newsize size [] = []
-  pick acc newsize size (x:xs) =
-    if acc >= size
-    then (x : pick (acc - size) newsize size (x:xs))
-    else pick (acc + newsize) newsize size xs -}
+cast_w8 :: [[Int]] -> [[Word8]]
+cast_w8 = map (map fromIntegral)
 
+black [r,g,b,a] = [0,0,0,a]
+none [r,g,b,a] = [0,0,0,0]
+setColor str = \[_,_,_,a2] -> [r,g,b, fromIntegral $ (fromIntegral a2 * fromIntegral a) `div` 255] where
+  [r,g,b,a] = toColor str
+
+colorFilter :: ([Word8] -> [Word8]) -> Bitmap [Word8] -> Bitmap [Word8]
+colorFilter f (Bitmap w h px) = Bitmap w h newpx where
+  newpx = map f $ px
+
+shift :: Int -> Int -> Bitmap [Word8] -> Bitmap [Word8]
+shift x y (Bitmap w h px) = Bitmap w h (concat newgrid2) where
+  grid = chunksOf w px
+  row = map none $ head grid
+  cell = none . head $ px
+  newgrid = case y > 0 of
+    True -> (take y $ repeat $ row) ++ (take (h - y) grid)
+    False -> (drop (-y) grid) ++ (take (-y) $ repeat $ row)
+  newgrid2 = case x > 0 of
+    True -> map (\r -> (take x $ repeat $ cell) ++ (take (w - x) r)) newgrid
+    False -> map (\r -> (drop (-x) r) ++ (take (-x) $ repeat $ cell)) newgrid
+
+resize w2 h2 (Bitmap w h px) = Bitmap w2 h2 $ concat newgrid2 where
+  grid = chunksOf w px
+  row = map none $ head grid
+  cell = none . head $ px
+  newgrid = (take (min h h2) grid) ++ (take (max 0 $ h2 - h) $ repeat $ row)
+  newgrid2 = map (\r -> (take (min w w2) r) ++ (take (max 0 $ w2 - w) $ repeat $ cell)) newgrid
+
+layer :: Bitmap [Word8] -> Bitmap [Word8] -> Bitmap [Word8]
+layer (Bitmap w h px) (Bitmap w2 h2 px2) = Bitmap (min w w2) (min h h2) newpx where
+  grid = chunksOf w px
+  grid2 = chunksOf w2 px2
+  newpx = concat . map (map (with onTop) . with zip) $ zip grid2 grid
+
+shadow :: Int -> String -> Bitmap [Word8] -> Bitmap [Word8]
+shadow off c b = layer b2 $ shift off off . colorFilter (setColor c) $ b2 where
+  b2 = resize (off + (width b)) (off + (height b)) b
 
 getIconPath :: CInt -> StateT IconState IO String
 getIconPath win = do
   st <- get
+  let cfg = iconConfig st
   case M.lookup win (iconCache st) of
     Just path -> return path
     Nothing -> do
@@ -272,14 +335,12 @@ getIconPath win = do
           let cache = M.insert win fileName (iconCache st)
           put st { iconCache = cache }
           exist <- liftIO $ doesFileExist fileName
-          if not exist
+          if not exist || not (cacheIcon cfg)
              then do
                prop <- liftIO $ peekArray nbytes propPtr
                let icons = makeIconList .  map (take 4) . chunksOf 8 $ prop
-                   icon = bestMatch ((scaleSize st) * 4 `div` 5) icons
-                   w = width icon
-                   ss = scaleSize st
-                   xpm = formatXPM ss . toTxtColors . cast_w8 . scale2D w ss . cast_int . map (setBackground $ toColor background) . pixels $ icon
+                   icon = bestMatch (pickSize cfg) icons
+                   xpm = formatXPM (bgColor cfg) . (postProcessing cfg) $ icon
                liftIO $ writeFile fileName xpm
              else return ()
           liftIO $ (freeFunc st) propPtr

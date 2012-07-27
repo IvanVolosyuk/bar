@@ -22,6 +22,7 @@ import Data.HashTable (hashString)
 
 height = 22
 padding = 4
+backgroundColor = "#BEBEBE"
 graphBackgroundColor = "#181838"
 cpuColorTable = ["#007F00", "#7F0000", "#600060", "#0000FF"]
 batteryColorTable = ["#303060"]
@@ -30,6 +31,22 @@ netColorTable = ["#0000FF", graphBackgroundColor, "#00FF00"]
 netSilenceThreshold = 100
 trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
              \ --widthtype request --height %d --margin %d" height rightMargin
+
+{- icon post processing options:
+ - shadow 1 "#30303030"
+ - resize 50 10
+ - shift 5 -5
+ - scaleLinear 20
+ - scaleNearest 20
+ - colorFilter black
+ -}
+
+iconConfig = defaultIconConfig {
+   pickSize = 16,
+   postProcessing = shadow 2 "#00000050" . shift 0 (-1) . scaleLinear 25,
+   cacheIcon = False,
+   bgColor = backgroundColor
+   }
 
 --          Object    refresh (sec)  position
 layout= [ (emptySpace,      never,  L 10),
@@ -216,7 +233,7 @@ replaceIcon st title = do
 
 genTitle :: Int -> BoxIO
 genTitle w = do
-  st0 <- initState height
+  st0 <- initState iconConfig
   genTitle' st0 w where
     genTitle' state w = do
       s1 <- getLine `catch` exit
