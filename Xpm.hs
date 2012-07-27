@@ -20,7 +20,7 @@ import qualified Data.Set as S
 import Data.Map ((!))
 import Data.Maybe
 import Numeric
-import Control.Monad.State (StateT, get, put, liftIO)
+import Control.Monad.State (StateT, get, put, liftIO, runStateT)
 import System.Posix.DynamicLinker
 import Foreign.C.String
 import GHC.Ptr
@@ -29,7 +29,7 @@ import Foreign.C
 import GHC.Word
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Marshal.Array (peekArray)
-import Foreign.Storable (peek)
+import Foreign.Storable (peek, peekByteOff)
 import Data.HashTable (hashString)
 import System.Directory (doesFileExist)
 
@@ -44,7 +44,7 @@ foreign import ccall "wrapper" wrap :: XErrorHandler -> IO (FunPtr XErrorHandler
 bgColor = "#BEBEBE"
 
 xpm0 = "/* XPM */"
-xpm1 = "static char *konsole[] = {"
+xpm1 = "static char *icon[] = {"
 xpm2 = "/* columns rows colors chars-per-pixel */"
 xpm3 w colors charPerPixel = printf "\"%d %d %d %d\"," w w colors charPerPixel
 xpm4 = "/* pixels */"
@@ -185,7 +185,8 @@ data IconState = IconState { propFunc :: XGetWindowPropertyFunc
                            }
 
 initState :: Int -> IO IconState
-initState sz = withDL "libX11.so" [RTLD_NOW] $ \mod -> do
+initState sz = do
+   mod <- dlopen "libX11.so" [RTLD_NOW]
    openDisplayPtr <- dlsym mod "XOpenDisplay"
    internAtomPtr <- dlsym mod "XInternAtom"
    getWinPropPtr <- dlsym mod "XGetWindowProperty"
@@ -201,6 +202,21 @@ initState sz = withDL "libX11.so" [RTLD_NOW] $ \mod -> do
    wrap errorHandler >>= xSetErrorHandler
    return $ IconState xGetWindowProperty xFree dpy atom M.empty sz
 
+fastHash :: Ptr Word8 -> Int -> IO Int
+fastHash p sz = genHash where
+  genHash = do
+     h <- fastHash' 0 0
+     return . snd $ h `divMod` 4000000007 :: IO Int
+  fastHash' idx hash = case idx < sz of
+    False -> return hash
+    True -> do
+       b <- peekByteOff p idx :: IO Word8
+       fastHash' (idx + 37) (hash * 37 + (fromIntegral b))
+
+makeFileName p sz = do
+   h <- fastHash p sz
+   return $ printf "icons/i%d.xpm" h :: IO String
+
 fetchIcon st win =
   alloca $ \actualTypeReturn ->
     alloca $ \actualFormatReturn ->
@@ -211,12 +227,12 @@ fetchIcon st win =
                    actualTypeReturn actualFormatReturn nitemsReturn
                    bytesAfterReturn propReturn
             nitems <- peek nitemsReturn
+            -- print $ "res:" ++ (show res)
+            -- print $ "nitems:" ++ (show nitems)
             if res /= 0 || nitems == 0 then return Nothing else do
               let nbytes = fromIntegral $ nitems * 8
               propPtr <- peek propReturn
-              prop <- peekArray nbytes propPtr
-              (freeFunc st) propPtr
-              return . Just . makeIconList .  map (take 4) . chunksOf 8 $ prop
+              return $ Just (propPtr, nbytes)
 
 getIconPath :: CInt -> StateT IconState IO String
 getIconPath win = do
@@ -227,13 +243,19 @@ getIconPath win = do
       mbIcons <- liftIO $ fetchIcon st win
       case mbIcons of
         Nothing -> return "icons/default.xpm"
-        Just icons -> do
-          let icon = bestMatch (iconSize st) icons
-              xpm = formatXPM . scaleRawImage (iconSize st) . toTxtColors $ icon
-              -- TODO: hash before scaling
-              iconName = printf "icons/i%d.xpm" . abs .hashString $ xpm
-          exist <- liftIO $ doesFileExist iconName
-          if not exist then do liftIO $ writeFile iconName xpm else return ()
-          let cache = M.insert win iconName (iconCache st)
+        Just (propPtr, nbytes) -> do
+          fileName <- liftIO $ makeFileName propPtr nbytes
+          let cache = M.insert win fileName (iconCache st)
           put st { iconCache = cache }
-          return iconName
+          exist <- liftIO $ doesFileExist fileName
+          if not exist
+             then do
+               prop <- liftIO $ peekArray nbytes propPtr
+               let icons = makeIconList .  map (take 4) . chunksOf 8 $ prop
+               let icon = bestMatch (iconSize st) icons
+                   xpm = formatXPM . scaleRawImage (iconSize st) . toTxtColors $ icon
+               liftIO $ writeFile fileName xpm
+             else return ()
+          liftIO $ (freeFunc st) propPtr
+          return fileName
+
