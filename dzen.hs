@@ -22,12 +22,31 @@ import Data.HashTable (hashString)
 
 height = 22
 padding = 4
+backgroundColor = "#BEBEBE"
 graphBackgroundColor = "#181838"
 cpuColorTable = ["#007F00", "#7F0000", "#600060", "#0000FF"]
 batteryColorTable = ["#303060"]
 memColorTable = ["#007F00", "#FF0000", "#0000FF"]
 netColorTable = ["#0000FF", graphBackgroundColor, "#00FF00"]
 netSilenceThreshold = 100
+trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
+             \ --widthtype request --height %d --margin %d" height rightMargin
+
+{- icon post processing options:
+ - shadow 1 "#30303030"
+ - resize 50 10
+ - shift 5 -5
+ - scaleLinear 20
+ - scaleNearest 20
+ - colorFilter black
+ -}
+
+iconConfig = defaultIconConfig {
+   pickSize = 16,
+   postProcessing = shadow 2 "#00000050" . shift 0 (-1) . scaleLinear 25,
+   cacheIcon = False,
+   bgColor = backgroundColor
+   }
 
 --          Object    refresh (sec)  position
 layout= [ (emptySpace,      never,  L 10),
@@ -74,7 +93,9 @@ strip :: String -> String
 strip s = reverse . dropWhile p . reverse . dropWhile p $ s where
   p = (==' ')
 
-split1 ch s = (x, tail xs) where
+split1 ch s = (x, safeTail xs) where
+  safeTail [] = []
+  safeTail (x:xs) = xs
   (x,xs) = break (==ch) s
 
 updateGraph samples sample = newSamples where
@@ -152,7 +173,7 @@ net dev width = do
 makeNetSample dev input = map (makeLine total) values where
   inbound = log $ (fromIntegral $ input !! 0) / netSilenceThreshold + 1
   outbound = log $ (fromIntegral $ input !! 8) / netSilenceThreshold + 1
-  total' = max 22 (inbound + outbound)
+  total' = max (fromIntegral height) (inbound + outbound)
   total = truncate total'
   values = map truncate [total', total' - outbound, inbound] :: [Int]
 
@@ -212,12 +233,16 @@ replaceIcon st title = do
 
 genTitle :: Int -> BoxIO
 genTitle w = do
-  st0 <- initState height
+  st0 <- initState iconConfig
   genTitle' st0 w where
     genTitle' state w = do
       s1 <- getLine `catch` exit
-      (s2, newState) <- replaceIcon state s1
-      return (s2, IOBox { exec = genTitle' newState w })
+      ready <- hReady stdin
+      if ready
+        then genTitle' state w
+        else do
+          (s2, newState) <- replaceIcon state s1
+          return (s2, IOBox { exec = genTitle' newState w })
 
 
 sec = 1000000
@@ -261,9 +286,8 @@ mergeTitle chan = forever $ do
   put newTitle
 
 spawnTrayer xpos = do
-  system $ "trayer --expand false --edge top --align right " ++
-                    "--widthtype request --height 22 --margin " ++ (show xpos)
-  return ()
+  let prog : args = split ' ' $ trayerCmd xpos
+  executeFile prog True args Nothing
 
 main = do
   -- fd <- openFd "/tmp/log3.txt" WriteOnly Nothing defaultFileFlags
