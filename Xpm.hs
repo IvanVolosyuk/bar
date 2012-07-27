@@ -2,14 +2,15 @@
 
 module Xpm (
   formatXPM,
-  scaleRawImage,
-  downscaleRawImage,
-  scale,
   Bitmap,
   chunksOf,
   getIconPath,
   initState,
-  IconState
+  IconState,
+  Math,
+  scale,
+  scale1D,
+  scale2D
   ) where
 
 import IO
@@ -41,7 +42,7 @@ foreign import ccall "dynamic" getWinProp__ :: FunPtr XGetWindowPropertyFunc -> 
 foreign import ccall "dynamic" free__ :: FunPtr XFreeFunc -> XFreeFunc
 foreign import ccall "wrapper" wrap :: XErrorHandler -> IO (FunPtr XErrorHandler)
 
-bgColor = "#BEBEBE"
+background = "#BEBEBE"
 
 xpm0 = "/* XPM */"
 xpm1 = "static char *icon[] = {"
@@ -59,60 +60,23 @@ colorGen n prefix = case n of
 
 
 formatColor :: (String,String) -> String
-formatColor (col,ch) = printf "\"%s c #%s\"" ch newcol where newcol = convertColor col
+formatColor (col,ch) = printf "\"%s c #%s\"" ch col
 
 join sep [] = ""
 join sep (x:xs) = foldl (\x y ->  x++sep++y ) x xs
 
-strBlend :: String -> (String, String) -> String
-strBlend as (cs,bs) = let [a,c,b] = map (fst . head . readHex) [as,cs,bs];
-                          res = (c * a + b * (255 - a)) `div` 255 :: Int in
-                   printf "%02X" res
-
-convertColor :: String -> String
-convertColor c =
-  let rgba = zip (chunksOf 2 c) (chunksOf 2 $ tail bgColor ++ "00");
-      ((a,_) : bgr) = reverse rgba in
-  concat . map (strBlend a) . reverse $ bgr
-
-
-imageWidth text = truncate . sqrt $ (fromIntegral . length $ text) / 8
-
-formatXPM :: String -> String
-formatXPM text = unlines [ xpm0, xpm1, xpm2, meta, colors, picture, "};" ] where
-  width = imageWidth text
-  colorSet = S.fromList $ chunksOf 8 text
+formatXPM :: Int -> String -> String
+formatXPM width text = unlines [ xpm0, xpm1, xpm2, meta, colors, picture, "};" ] where
+  colorSet = S.fromList $ chunksOf 6 text -- FIXME: repeated 7 lines below
   charsPerPixel = if (S.size colorSet) > (length symbols) then 2 else 1 :: Int
   colorMapList = zip (S.toList colorSet) (colorGen charsPerPixel "")
   meta = xpm3 width (length colorMapList) charsPerPixel
   colorMapStrings = map formatColor colorMapList
   colors = join ",\n" $ colorMapStrings ++ [ xpm4 ]
   colorMap = M.fromList colorMapList
-  textConv = concat . map (colorMap !) $ chunksOf 8 text
+  textConv = concat . map (colorMap !) $ chunksOf 6 text
   picture = join ",\n" $ map (printf "\"%s\"") $ chunksOf (width * charsPerPixel) textConv
 
-scale :: Int -> [a] -> [a]
-scale newsize ar = pick newsize newsize size ar where
-  size = length ar
-  pick acc newsize size [] = []
-  pick acc newsize size (x:xs) =
-    if acc >= size
-    then (x : pick (acc - size) newsize size (x:xs))
-    else pick (acc + newsize) newsize size xs
-
-
-downscaleRawImage :: Int -> String -> String
-downscaleRawImage sz text =
-  let width = imageWidth text in
-  if width > sz
-  then scaleRawImage sz text
-  else text
-
-scaleRawImage :: Int -> String -> String
-scaleRawImage sz text = newtext where
-  width = imageWidth text
-  newtext = concat . scale sz . (map scaleLine) . chunksOf (8 * width) $ text
-  scaleLine = concat . scale sz . (chunksOf 8)
 
 type XOpenDisplayFunc = CString -> IO (Ptr CInt)
 type XInternIconFunc = Ptr CInt -> CString -> CInt -> IO CInt
@@ -167,21 +131,17 @@ blend a1 a2 (v1, v2) = fromIntegral $ (a1' * v1' + a2' * v2') `div` 255 where
 setBackground bg color = map (blend (255-a) a) . zip bg $ reverse bgr where
   (a:bgr) = reverse color
 
-setImageBackground txtBg (Bitmap w h px) = Bitmap w h newpx where
-  bg = map (fst . head . readHex) . chunksOf 2 $ tail txtBg
-  newpx = map (setBackground bg) px
+toColor str = map (fst . head . readHex) . chunksOf 2 $ tail str 
 
-toTxtColors :: Bitmap [Word8] -> String
-toTxtColors (Bitmap w h px) = concat . conv $ px where
-  conv [] = []
-  conv (x:xs) = (concat . map (printf "%02X") $ x) : conv xs
+toTxtColors :: [[Word8]] -> String
+toTxtColors = concat . map (concat . map (printf "%02X"))
 
 data IconState = IconState { propFunc :: XGetWindowPropertyFunc
                            , freeFunc :: XFreeFunc
                            , dpy :: Ptr CInt
                            , atom :: CInt
                            , iconCache :: M.Map CInt String
-                           , iconSize :: Int
+                           , scaleSize :: Int
                            }
 
 initState :: Int -> IO IconState
@@ -234,6 +194,70 @@ fetchIcon st win =
               propPtr <- peek propReturn
               return $ Just (propPtr, nbytes)
 
+
+scaleSimple :: Int -> [a] -> [a]
+scaleSimple newsize ar = pick 0 newsize size ar where
+  size = length ar
+  pick acc newsize size [] = []
+  pick acc newsize size (x:xs) =
+    if acc >= size
+    then (x : pick (acc - size) newsize size (x:xs))
+    else pick (acc + newsize) newsize size xs
+
+class Math a where
+  mul :: Int -> a -> a
+  add :: a -> a -> a
+  normalize :: Int -> a -> a
+  scale :: Int -> Int -> [a] -> [a]
+  scale size newsize (a:ar) = pick 0 0 0 zero (a:ar) where
+    zero = mul 0 a
+    pick pos newpos maxpos acc [] = []
+    pick pos newpos maxpos acc (a:ar) = if (pos + newsize) < (newpos + size)
+      then let pos' = pos + newsize;
+               acc' = ((pos' - maxpos) `mul` a) `add` acc in
+           pick pos' newpos pos' acc' ar
+      else let newpos' = newpos + size;
+               acc' = ((newpos' - maxpos) `mul` a) `add` acc in
+           (acc' : pick pos newpos' newpos' zero (a:ar))
+    
+
+instance Math Int where
+  mul a x = a * x
+  normalize a x = x `div` a
+  add x y = x + y
+
+with op (a,b) = op a b
+
+instance (Math a) => Math [a] where
+  mul a xs = map (mul a) $ xs
+  normalize a xs = map (normalize a) $ xs
+  add xs ys = map (with add) $ zip xs ys
+
+scale1D newsize a = map (normalize size) . scale size newsize $ a where
+  size = length a
+
+scale2D size newsize = concat . (normalize (size * size)) . scale size newsize . (map $ scale size newsize) . chunksOf size
+
+scaleImage :: Int -> Int -> [[Word8]] -> [[Word8]]
+scaleImage width sz = concat . scaleSimple sz . (map $ scaleSimple sz) . chunksOf width
+
+
+cast_int :: [[Word8]] -> [[Int]]
+cast_w8 = map (map fromIntegral)
+
+cast_w8 :: [[Int]] -> [[Word8]]
+cast_int = map (map fromIntegral)
+
+{-scaleAndFilter :: Int -> [a] -> [a]
+scaleAndFilter newsize ar = pick newsize newsize size ar where
+  size = length ar
+  pick acc newsize size [] = []
+  pick acc newsize size (x:xs) =
+    if acc >= size
+    then (x : pick (acc - size) newsize size (x:xs))
+    else pick (acc + newsize) newsize size xs -}
+
+
 getIconPath :: CInt -> StateT IconState IO String
 getIconPath win = do
   st <- get
@@ -252,8 +276,10 @@ getIconPath win = do
              then do
                prop <- liftIO $ peekArray nbytes propPtr
                let icons = makeIconList .  map (take 4) . chunksOf 8 $ prop
-               let icon = bestMatch (iconSize st) icons
-                   xpm = formatXPM . scaleRawImage (iconSize st) . toTxtColors $ icon
+                   icon = bestMatch ((scaleSize st) * 4 `div` 5) icons
+                   w = width icon
+                   ss = scaleSize st
+                   xpm = formatXPM ss . toTxtColors . cast_w8 . scale2D w ss . cast_int . map (setBackground $ toColor background) . pixels $ icon
                liftIO $ writeFile fileName xpm
              else return ()
           liftIO $ (freeFunc st) propPtr

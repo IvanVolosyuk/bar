@@ -29,7 +29,7 @@ memColorTable = ["#007F00", "#FF0000", "#0000FF"]
 netColorTable = ["#0000FF", graphBackgroundColor, "#00FF00"]
 netSilenceThreshold = 100
 trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
-             \ --widthtype request --height 22 --margin %d" rightMargin
+             \ --widthtype request --height %d --margin %d" height rightMargin
 
 --          Object    refresh (sec)  position
 layout= [ (emptySpace,      never,  L 10),
@@ -156,7 +156,7 @@ net dev width = do
 makeNetSample dev input = map (makeLine total) values where
   inbound = log $ (fromIntegral $ input !! 0) / netSilenceThreshold + 1
   outbound = log $ (fromIntegral $ input !! 8) / netSilenceThreshold + 1
-  total' = max 22 (inbound + outbound)
+  total' = max (fromIntegral height) (inbound + outbound)
   total = truncate total'
   values = map truncate [total', total' - outbound, inbound] :: [Int]
 
