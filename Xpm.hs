@@ -26,7 +26,7 @@ module Xpm (
   shadow,
   scale1D,
   scale2D,
-  with
+  pair
   ) where
 
 import IO
@@ -43,6 +43,7 @@ import Foreign.C.String
 import GHC.Ptr
 import Foreign.Ptr
 import Foreign.C
+import Foreign (sizeOf)
 import GHC.Word
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Marshal.Array (peekArray)
@@ -101,8 +102,8 @@ type XGetWindowPropertyFunc =
      Ptr CInt  -- Display* (dpy)
      -> CInt -- Window w (argument)
      -> CInt -- Atom property (atom)
-     -> CLLong -- long long offset (0)
-     -> CLLong  -- long long_length (1000000)
+     -> CLong -- long long_offset (0)
+     -> CLong  -- long long_length (1000000)
      -> CInt    -- Bool delete (False = 0)
      -> CLong   -- Atom req_type (AnyPropertyType = 0L)
      -> Ptr CInt  -- Atom *actual_type_return
@@ -208,6 +209,8 @@ makeFileName p sz = do
    h <- fastHash p sz
    return $ printf "icons/i%d.xpm" h :: IO String
 
+ptr_size = sizeOf (undefined :: CLong)
+
 fetchIcon st win =
   alloca $ \actualTypeReturn ->
     alloca $ \actualFormatReturn ->
@@ -221,7 +224,7 @@ fetchIcon st win =
             -- print $ "res:" ++ (show res)
             -- print $ "nitems:" ++ (show nitems)
             if res /= 0 || nitems == 0 then return Nothing else do
-              let nbytes = fromIntegral $ nitems * 8
+              let nbytes = fromIntegral $ nitems * (fromIntegral ptr_size)
               propPtr <- peek propReturn
               return $ Just (propPtr, nbytes)
 
@@ -256,12 +259,12 @@ instance Math Int where
   normalize a x = x `div` a
   add x y = x + y
 
-with op (a,b) = op a b
+pair op (a,b) = op a b
 
 instance (Math a) => Math [a] where
   mul a xs = map (mul a) $ xs
   normalize a xs = map (normalize a) $ xs
-  add xs ys = map (with add) $ zip xs ys
+  add xs ys = map (pair add) $ zip xs ys
 
 scale1D newsize a = map (normalize size) . scale size newsize $ a where
   size = length a
@@ -314,7 +317,7 @@ layer :: Bitmap [Word8] -> Bitmap [Word8] -> Bitmap [Word8]
 layer (Bitmap w h px) (Bitmap w2 h2 px2) = Bitmap (min w w2) (min h h2) newpx where
   grid = chunksOf w px
   grid2 = chunksOf w2 px2
-  newpx = concat . map (map (with onTop) . with zip) $ zip grid2 grid
+  newpx = concat . map (map (pair onTop) . pair zip) $ zip grid2 grid
 
 shadow :: Int -> String -> Bitmap [Word8] -> Bitmap [Word8]
 shadow off c b = layer b2 $ shift off off . colorFilter (setColor c) $ b2 where
@@ -338,11 +341,10 @@ getIconPath win = do
           if not exist || not (cacheIcon cfg)
              then do
                prop <- liftIO $ peekArray nbytes propPtr
-               let icons = makeIconList .  map (take 4) . chunksOf 8 $ prop
+               let icons = makeIconList . map (take 4) . chunksOf ptr_size $ prop
                    icon = bestMatch (pickSize cfg) icons
                    xpm = formatXPM (bgColor cfg) . (postProcessing cfg) $ icon
                liftIO $ writeFile fileName xpm
              else return ()
           liftIO $ (freeFunc st) propPtr
           return fileName
-
