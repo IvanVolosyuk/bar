@@ -43,7 +43,7 @@ trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
 
 iconConfig = defaultIconConfig {
    pickSize = 16,
-   postProcessing = shadow 2 "#00000050" . shift 0 (-1) . scaleLinear 25,
+   postProcessing = shadow 2 "#00000050" . shift 0 (-1) . scaleLinear 25 . shadow 2 "#000000FF" . scaleLinear 64,
    cacheIcon = False,
    bgColor = backgroundColor
    }
