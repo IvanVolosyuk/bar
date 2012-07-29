@@ -51,7 +51,7 @@ iconConfig = defaultIconConfig {
 --          Object    refresh (sec)  position
 layout= [ (emptySpace,      never,  L 10),
           (genTitle,            0,  L 0),
-          (net "wlan0",         5,  R 20),
+          (net "eth1",         5,  R 20),
           (net "eth0",          5,  R 20),
        --   (batteryGraph,      300,  R 40),
           (battery,             5,  R 120),
