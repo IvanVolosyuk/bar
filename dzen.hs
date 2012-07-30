@@ -22,6 +22,7 @@ import Data.HashTable (hashString)
 
 height = 22
 padding = 4
+maxUpdatesPerSecond = 20
 backgroundColor = "#BEBEBE"
 graphBackgroundColor = "#181838"
 cpuColorTable = ["#007F00", "#7F0000", "#600060", "#0000FF"]
@@ -285,7 +286,7 @@ mergeTitle chan = forever $ do
   when isEmpty $ do
     liftIO $ putStrLn $ concat newTitle
     liftIO $ hFlush stdout
-    liftIO $ threadDelay $ sec `div` 10
+    liftIO $ threadDelay $ sec `div` maxUpdatesPerSecond
   put newTitle
 
 spawnTrayer xpos = do
