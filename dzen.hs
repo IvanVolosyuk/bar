@@ -44,7 +44,7 @@ trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
 iconConfig = defaultIconConfig {
    pickSize = 16,
    postProcessing = shadow 2 "#00000050" . shift 0 (-1) . scaleLinear 25 . shadow 2 "#000000FF" . scaleLinear 64,
-   cacheIcon = False,
+   cacheIcon = True,
    bgColor = backgroundColor
    }
 
@@ -281,8 +281,10 @@ mergeTitle chan = forever $ do
   title <- get
   (n, val) <- liftIO $ readChan chan
   let newTitle = l ++ (val : r) where (l, _:r) = splitAt n title
-  liftIO $ putStrLn $ concat newTitle
-  liftIO $ hFlush stdout
+  isEmpty <- liftIO $ isEmptyChan chan
+  when isEmpty $ do
+    liftIO $ putStrLn $ concat newTitle
+    liftIO $ hFlush stdout
   put newTitle
 
 spawnTrayer xpos = do
