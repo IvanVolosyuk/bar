@@ -285,6 +285,7 @@ mergeTitle chan = forever $ do
   when isEmpty $ do
     liftIO $ putStrLn $ concat newTitle
     liftIO $ hFlush stdout
+    liftIO $ threadDelay $ sec `div` 10
   put newTitle
 
 spawnTrayer xpos = do
