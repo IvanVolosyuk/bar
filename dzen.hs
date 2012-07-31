@@ -22,6 +22,7 @@ import Data.HashTable (hashString)
 
 height = 22
 padding = 4
+maxUpdatesPerSecond = 60
 backgroundColor = "#BEBEBE"
 graphBackgroundColor = "#181838"
 cpuColorTable = ["#007F00", "#7F0000", "#600060", "#0000FF"]
@@ -117,8 +118,8 @@ readBatteryFile = readKeyValueFile head
 readNetFile = readKeyValueFile $ map read
 
 newtype IOBox = IOBox { exec :: IO (String, IOBox) }
-data Geometry = L Int | R Int
 type BoxIO = IO (String, IOBox)
+data Geometry = L Int | R Int
 type BoxState = StateT BoxIO IO
 type Graph = [[String]]
 
