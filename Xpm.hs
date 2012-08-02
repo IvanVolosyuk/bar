@@ -269,6 +269,7 @@ instance (Math a) => Math [a] where
 scale1D newsize a = map (normalize size) . scale size newsize $ a where
   size = length a
 
+scale2D :: Int -> Int -> Int -> [[Int]] -> [[Int]]
 scale2D w h newsize = concat . (normalize (w * h)) . scale h newsize
                    . (map $ scale w newsize) . chunksOf w
 
@@ -277,13 +278,10 @@ scaleNearest sz (Bitmap w h px ) = Bitmap sz sz . concat
      . scaleSimple w sz . (map $ scaleSimple w sz) . chunksOf w $ px
 
 scaleLinear sz (Bitmap w h px) = Bitmap sz sz
-      . cast_w8 . scale2D w h sz . cast_int $ px
+      . cast . scale2D w h sz . cast $ px
 
-cast_int :: [[Word8]] -> [[Int]]
-cast_int = map (map fromIntegral)
-
-cast_w8 :: [[Int]] -> [[Word8]]
-cast_w8 = map (map fromIntegral)
+cast :: (Integral a, Num b) => [[a]] -> [[b]]
+cast = map (map fromIntegral)
 
 black [r,g,b,a] = [0,0,0,a]
 none [r,g,b,a] = [0,0,0,0]
