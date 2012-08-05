@@ -52,10 +52,10 @@ iconConfig = defaultIconConfig {
 --          Object    refresh (sec)  position
 layout= [ (emptySpace,      never,  L 10),
           (genTitle,            0,  L 0),
-       --   (net "wlan0",         5,  R 20),
+          (net "wlan0",         5,  R 20),
           (net "eth0",          5,  R 40),
        --   (batteryGraph,      300,  R 40),
-       --   (battery,             5,  R 120),
+          (battery,             5,  R 120),
           (mem,                60,  R 15),
           (cpu,                 2,  R 70),
           (clock,               2,  R 60)
@@ -150,7 +150,7 @@ clock width = do
   return (frame' ++ clockDisplay, IOBox { exec = clock width })
 
 mem width = do
-  let zeroGraph = take 4 $ repeat $ take width $ repeat $ bar 0
+  let zeroGraph = replicate 4 $ replicate width $ bar 0
   mem' width zeroGraph where
     mem' width graph = do
       memState <- liftIO $ readBatteryFile "/proc/meminfo"
@@ -162,7 +162,7 @@ makeMemSample input = map (makeLine total) values where
   values = [total - free, total - free - cached, active]
 
 net dev width = do
-  let zeroGraph = take 3 $ repeat $ take width $ repeat $ bar 0
+  let zeroGraph = replicate 3 $ replicate width $ bar 0
   netState <- liftIO $ readNetFile "/proc/net/dev"
   net' dev width zeroGraph netState where
     net' dev width graph netState = do
@@ -181,7 +181,7 @@ makeNetSample dev input = map (makeLine total) values where
 delta newar ar = map (\(n,o) -> n-o) $ zip newar ar
 
 cpu width = do
-  let zeroGraph = take 3 $ repeat $ take width $ repeat $ bar 0
+  let zeroGraph = replicate 3 $ replicate width $ bar 0
   procData <- getCpuData
   cpu' width zeroGraph procData where
     cpu' width graph procData = do
@@ -197,7 +197,7 @@ makeCpuSample (_ :user:nice:sys:idle:io:tail) = map (makeLine total) values wher
 
 batteryGraph width = do
   batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
-  let zeroGraph = (take width $ repeat $ bar 0) : []
+  let zeroGraph = (replicate width $ bar 0) : []
   batGr' width zeroGraph $ read $ batteryInfo ! "design capacity" where
     batGr' width graph capacity = do
         batteryState <- liftIO $ readBatteryFile "/proc/acpi/battery/BAT0/state"
@@ -300,6 +300,6 @@ main = do
   screenWidth <- getScreenWidth
   (_, offsetR) <- initLayoutAll chan 0 (screenWidth + padding `div` 2) $ zip (enumFrom 0) layout
   forkProcess $ spawnTrayer $ screenWidth - offsetR + padding `div` 2
-  let emptyTitle = take (length layout) . repeat $ ""
+  let emptyTitle = replicate (length layout) $ ""
   evalStateT (mergeTitle chan) emptyTitle
 

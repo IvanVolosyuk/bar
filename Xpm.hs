@@ -50,6 +50,7 @@ import Foreign.Marshal.Array (peekArray)
 import Foreign.Storable (peek, peekByteOff)
 import Data.HashTable (hashString)
 import System.Directory (doesFileExist)
+import Icon
 
 foreign import ccall "dynamic" openDisplay__ :: FunPtr XOpenDisplayFunc -> XOpenDisplayFunc
 foreign import ccall "dynamic" closeDisplay__ :: FunPtr XCloseDisplayFunc -> XCloseDisplayFunc
