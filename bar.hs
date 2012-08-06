@@ -45,8 +45,7 @@ netSilenceThreshold = 100
 marginTop = 1 :: Int
 marginBottom = 1 :: Int
 marginsVertical = marginTop + marginBottom :: Int
-fontName = "-*-fixed-medium-r-normal--15-*-*-*-*-*-iso10646-*"
-fontXft = True
+defaultFontName = "-*-fixed-medium-r-normal--15-*-*-*-*-*-iso10646-*"
 clockTimeFormat = "%R"
 
 -- widgets = [
@@ -69,7 +68,6 @@ loadWidgets = [ -- widget   width refresh
    ]
 
 loadTooltipWidgets = [
-   (makeClockWidget, 60, 1, wc),
    (makeCpuWidget, 80, 0.03, wc),
    (makeNetWidget "wlan0", 80, 0.05, wc)
    ]
@@ -81,7 +79,7 @@ type BoxIO a = IO (a, IOBox a)
 
 type ControlChan = Chan (Window,CInt)
 
-type ExtendedState = (GlobalState, Widget)
+type ExtendedState = Widget
 
 data WidgetConfig = WidgetConfig {
   widgetWidth :: Int,
@@ -89,7 +87,8 @@ data WidgetConfig = WidgetConfig {
   refreshRate :: Int,
   widgetX :: Int,
   drawFrame :: Bool,
-  widgetTooltop :: WidgetLine
+  widgetTooltop :: WidgetLine,
+  fontName :: String
   }
 defaultWidgetConfig = WidgetConfig {
     widgetWidth = 100,
@@ -97,13 +96,13 @@ defaultWidgetConfig = WidgetConfig {
     refreshRate = 100000,
     widgetX = 0,
     drawFrame = True,
-    widgetTooltop = (makeCpuWidget, 60, 0.1, wc)
+    widgetTooltop = (makeCpuWidget, 60, 0.1, wc),
+    fontName = defaultFontName
     }
 
 data RenderState = RenderState { getDisplay :: Display, getDrawable::Pixmap, getGC :: GC}
 data WindowRenderState = WindowRenderState Window GC
 data GlobalState = GlobalState { getIconCache :: IconCache,
-                                 getFont :: Either XftFont FontSet,
                                  widgetsById :: M.Map Window (M.Map CInt Widget),
                                  mainWindow :: Window,
                                  tooltipWindow :: Maybe Window,
@@ -157,12 +156,21 @@ setfg (RenderState dpy w gc) color = setForeground dpy gc color
 setbg (RenderState dpy w gc) color = setBackground dpy gc color
 fillRect (RenderState dpy win gc) x y w h = fillRectangle dpy win gc (fi x) (fi y) (fi w) (fi h)
 
-
-drawAllWidgets gState [] pos = return (gState, [])
-drawAllWidgets gState widgets pos = do
+measureAllWidgets [] pos = return []
+measureAllWidgets widgets pos = do
   print "Draw all widgets!"
   let (widgetId,widget) : otherWidgets = widgets
-  (width, (gState, widget)) <- runStateT (onMeasure widget) (gState,widget)
+  (width, widget) <- runStateT (onMeasure widget) widget
+  let widgetPos = pos - width - padding
+  let widget2 = widget { widgetConfig = (widgetConfig widget) { widgetX = widgetPos } }
+  otherWidgets <- measureAllWidgets otherWidgets (widgetPos)
+  return $ (widgetId, widget2) : otherWidgets
+
+drawAllWidgets [] pos = return []
+drawAllWidgets widgets pos = do
+  print "Draw all widgets!"
+  let (widgetId,widget) : otherWidgets = widgets
+  (width, widget) <- runStateT (onMeasure widget) widget
   let widgetPos = pos - width - padding
   let widget2 = widget { widgetConfig = (widgetConfig widget) { widgetX = widgetPos } }
 
@@ -171,9 +179,9 @@ drawAllWidgets gState widgets pos = do
   fillRect rs widgetPos marginTop width (barHeight - marginsVertical)
   setfg rs 0xFFFFFF
 
-  (gState, widget2) <- execStateT ((onDraw widget2) widgetPos) (gState,widget2) 
-  (gState, otherWidgets) <- drawAllWidgets gState otherWidgets (widgetPos)
-  return (gState, (widgetId,widget2) : otherWidgets)
+  widget2 <- execStateT ((onDraw widget2) widgetPos) widget2 
+  otherWidgets <- drawAllWidgets otherWidgets (widgetPos)
+  return $ (widgetId, widget2) : otherWidgets
 
 data EventResult = Done | ExitEventLoop | Update GlobalState
 
@@ -197,7 +205,7 @@ handleMessage gState (ClientMessageEvent {ev_window = w, ev_data = widgetId:_}) 
      case M.lookup widgetId windowWidgetMap of
        Nothing -> return Done
        Just widget -> do
-         (gState, widget) <- execStateT (doUpdate widget) (gState,widget)
+         widget <- execStateT (doUpdate widget) widget
    
          let x = widgetX . widgetConfig $  widget
          let wConf = widgetConfig widget
@@ -207,7 +215,7 @@ handleMessage gState (ClientMessageEvent {ev_window = w, ev_data = widgetId:_}) 
            setfg rs graphBackgroundColor -- FIXME: move to widget draw?
            fillRect rs x marginTop width (barHeight - marginsVertical)
    
-         (gState, widget) <- execStateT ((onDraw widget) x) (gState, widget) 
+         widget <- execStateT ((onDraw widget) x) widget 
          updateWindowRegion (fi x) (fi width) widget
          let windowWidgetMap' = M.insert widgetId widget windowWidgetMap
          let widgetsMap' = M.insert w windowWidgetMap' widgetsMap
@@ -224,7 +232,7 @@ handleMessage gState (ExposeEvent {ev_window = w}) = do
       let widgets = M.toList windowWidgetMap
       let (_,widget) = head widgets
       drawWindow (getRenderState widget) (getWindowRenderState widget)
-      (gState, widgets) <- drawAllWidgets gState widgets (fi barWidth)
+      widgets <- drawAllWidgets widgets (fi barWidth)
       print "MapNotify: expensive redraw all"
       updateWindow widget
       return $ Update gState { widgetsById = M.insert w (M.fromList widgets) widgetsMap }
@@ -274,7 +282,7 @@ handleMessage gState (CrossingEvent {ev_event_type = 8, ev_window = ww, ev_event
     Just w -> do
       let widgetsMap = widgetsById gState
       let windowWidgetMap = fromMaybe M.empty (M.lookup w widgetsMap)
-      mapM (destroyWidget gState) . M.elems $ windowWidgetMap
+      mapM destroyWidget . M.elems $ windowWidgetMap
       destroyWindow dpy w
       return . Update $ gState { widgetsById = M.delete w widgetsMap, tooltipWindow = Nothing }
 
@@ -318,9 +326,6 @@ inputReader chan = loopForever `catch` \x -> writeChan chan (-1) where
     print $ "Line: " ++ line
     writeChan chan 333
 
-errorHandler dpy err = do
-  print "X11 Error!"
-
 main = do
   dpy <- openDisplay "" -- FIXME: proper way to get display name
   let scr = (defaultScreen dpy)
@@ -359,26 +364,23 @@ main = do
   mapWindow dpy w
 
   chan <- newChan
-  setErrorHandler errorHandler
+  xSetErrorHandler
   eventCopyThread <- forkOS $ copyChanToX chan
 
   let rState = RenderState dpy buf buf_gc
   let wrState = WindowRenderState w gc
   widgets <- mapM (initWidget rState wrState chan) $ zip [1..] loadWidgets
 
-  font <- case fontXft of
-    False -> createFontSet dpy fontName >>= \(_,_,fontSet) -> return $ Right fontSet
-    True -> xftFontOpenXlfd dpy (defaultScreenOfDisplay dpy) fontName >>= return . Left
   iconCache <- makeIconCache dpy
-  let gState = GlobalState iconCache font (M.insert w (M.fromList widgets) M.empty) w Nothing chan
+  let gState = GlobalState iconCache (M.insert w (M.fromList widgets) M.empty) w Nothing chan
   eventLoop dpy gState
   
   killThread eventCopyThread
-  mapM (destroyWidget gState) . concat . map M.elems . M.elems . widgetsById $ gState
+  mapM destroyWidget . concat . map M.elems . M.elems . widgetsById $ gState
   destroyWindow dpy w
   closeDisplay dpy
 
-destroyWidget gState w = runStateT (onDestroy w) (gState, w)
+destroyWidget w = runStateT (onDestroy w) w
 
 initWidget :: RenderState -> WindowRenderState -> ControlChan -> 
               (CInt, (MakeWidget, Int, Double, WidgetConfig)) -> IO (CInt, Widget)
@@ -396,7 +398,7 @@ data CpuState = CpuState { samples :: [[Int]] }
 
 simpleOnMeasure :: a -> StateT ExtendedState IO Int
 simpleOnMeasure _ = do
-  (_,widgetState) <- get
+  widgetState <- get
   return . widgetWidth . widgetConfig $ widgetState
 
 wrapWidget functions widget state =
@@ -477,19 +479,19 @@ statelessBox newState = makeBox (return ()) $ \_ -> do
 
 makeWidgetWithThread makeInitialState makeThread prepareData drawData masterChan widgetSetup = do
   let config = widgetConfig widgetSetup
-      initialState = makeInitialState config
       (WindowRenderState win _) = getWindowRenderState widgetSetup
   (clientChan, threadId) <- runBackgroundTask masterChan win config makeThread
+  initialState <- makeInitialState (getRenderState widgetSetup) config
   let state = (initialState, clientChan, threadId)
   return $ wrapWidget functions widgetSetup state where
     functions = defaultFunctions { onDrawFunc = draw, doUpdateFunc = update, onDestroyFunc = destroy }
     draw (widgetState,_,_) pos = drawData widgetState pos
     update state = do
-      (gState, widget) <- get
+      widget <- get
       let (widgetState, chan, threadId) = state
       newSample <- liftIO $ readChan chan
-      let newWidgetState = prepareData widgetState newSample
-      put (gState, wrapWidget functions widget (newWidgetState, chan, threadId))
+      newWidgetState <- prepareData widgetState newSample
+      put $ wrapWidget functions widget (newWidgetState, chan, threadId)
     destroy (_,_,threadId) = liftIO $ killThread threadId
 
 dropZeros [] = []
@@ -498,10 +500,10 @@ dropZeros ((i,v):xs) = (i,v) : dropZeros xs
 
 makeGraphWidget colorTable makeThread =
   makeWidgetWithThread initialState makeThread prepareData drawData where
-    initialState config = replicate (length colorTable) $ replicate (widgetWidth config) 0
-    prepareData state newSample = updateGraph state newSample
+    initialState _ config = return $ replicate (length colorTable) $ replicate (widgetWidth config) 0
+    prepareData state newSample = return $ updateGraph state newSample
     drawData graph pos = do
-      (gState, widget) <- get
+      widget <- get
       let segments = map (\a -> map makeSegment $ dropZeros $ zip [pos..] a) graph -- FIXME: segments using x position
       -- liftIO . print . show . map head . map reverse $ segments
       let rs = getRenderState widget
@@ -544,27 +546,36 @@ makeNetWidget dev masterChan widgetSetup = makeGraphWidget netColorTable
     total = truncate maxF
     values = map truncate [maxF, maxF - inbound, outbound] :: [Int]
 
-drawText msg pos = do
-  (gState, widget) <- get
+drawText font msg pos = do
+  widget <- get
   let rs@(RenderState dpy w gc) = (getRenderState widget)
   liftIO $ do
     setbg rs graphBackgroundColor
     setfg rs 0xC7AE86
-    case getFont gState of
-      Right font ->
-       wcDrawString dpy w font gc (fi $ pos + (padding `div` 2)) 17 msg
-      Left font ->
-        withXftDraw dpy w vis colormap action where
-          scr = defaultScreen dpy
-          vis = defaultVisual dpy scr
-          colormap = defaultColormap dpy scr
-          action d = withXftColorName dpy vis colormap "#C7AE86" $ \c -> do
-             xftDrawString d c font (pos + (padding `div` 2)) 18 msg
+    let  scr = defaultScreen dpy
+         vis = defaultVisual dpy scr
+         colormap = defaultColormap dpy scr
+         action d = withXftColorName dpy vis colormap "#C7AE86" $ \c -> do
+            xftDrawString d c font (pos + (padding `div` 2)) 18 msg
+    withXftDraw dpy w vis colormap action
+
+makeWidgetWithThreadAndFont makeInitialState makeThread makePrepareData makeDrawData =
+  makeWidgetWithThread initialState makeThread prepareData drawData where
+    initialState rs@(RenderState dpy _ _) config = do
+      font <- xftFontOpenXlfd dpy (defaultScreenOfDisplay dpy) (fontName config)
+      state <- makeInitialState rs config
+      return (font, state)
+ 
+    prepareData (font, st) newst = do
+      newst <- makePrepareData st newst
+      return (font, newst)
+    drawData (font, st) = makeDrawData font st
+      
 
 makeBatteryhWidget =
-  makeWidgetWithThread initialState makeThread prepareData drawData where
-    initialState config = ".."
-    prepareData state newMsg = newMsg
+  makeWidgetWithThreadAndFont initialState makeThread prepareData drawData where
+    initialState _ config = return ""
+    prepareData _ newMsg = return newMsg
     drawData = drawText
     makeThread = statelessBox $ do
       batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
@@ -578,10 +589,11 @@ makeBatteryhWidget =
         "discharging" | rate /= 0 -> printf "%d%%(%d:%02d)" percent h m
         otherwise -> printf "%d%%C" percent
 
+
 makeClockWidget =
-  makeWidgetWithThread initialState makeThread prepareData drawData where
-    initialState config = ".."
-    prepareData state newMsg = newMsg
+  makeWidgetWithThreadAndFont initialState makeThread prepareData drawData where
+    initialState _ config = return ""
+    prepareData _ newMsg = return newMsg
     drawData = drawText
     makeThread = statelessBox $ do
       time <- liftIO getCurrentTime
@@ -590,9 +602,19 @@ makeClockWidget =
       return $ formatTime defaultTimeLocale clockTimeFormat localtime
 
 makeTitleWidget masterChan = 
-  makeWidgetWithThread initialState makeThread prepareData drawData masterChan where
-    initialState config = []
-    prepareData state newMsg = newMsg
+  makeWidgetWithThreadAndFont initialState makeThread prepareData drawData masterChan where
+    initialState (RenderState dpy _ _) config = do
+      iconCache <- makeIconCache dpy
+      return (iconCache, [])
+    prepareData (iconCache, _) newMsg = do
+      iconCache' <- liftIO $ loadIcons iconCache newMsg
+      return (iconCache', newMsg) where
+        loadIcons iconCache [] = return iconCache
+        loadIcons iconCache (IconRef winid:xs) = do
+          iconCache' <- loadIconImage iconCache $ fi winid
+          loadIcons iconCache' xs
+          
+        loadIcons iconCache (x:xs) = loadIcons iconCache xs
     drawData = drawDzen
     exit _ = writeChan masterChan (0, -1) >> return ""
     makeThread = statelessBox $ do
@@ -604,23 +626,19 @@ withDefault defaultColor color = case color of
   "" -> defaultColor
   otherwise -> color
 
-drawDzen :: [Message] -> Int -> StateT ExtendedState IO ()
-drawDzen input pos = do
-  (gState, widget) <- get
+--drawDzen :: (XftFont, [Message]) -> Int -> StateT ExtendedState IO ()
+drawDzen font state pos = do
+  widget <- get
   let wConf = widgetConfig widget
-  case getFont gState of
-     Right font -> liftIO $ print "Non-XFT drawing not implemented" >> return ()
-     Left font  -> drawDzenXft font input pos (gState, widget) wConf
+  drawDzenXft font state pos widget wConf
   
-drawDzenXft :: XftFont -> [Message] -> Int -> (GlobalState, Widget) -> WidgetConfig -> StateT ExtendedState IO ()
-drawDzenXft font input pos (gState, widget) wConf = do
-  let cache = getIconCache gState
+--drawDzenXft :: XftFont -> [Message] -> Int -> (GlobalState, Widget) -> WidgetConfig -> StateT ExtendedState IO ()
+drawDzenXft font (iconCache, input) pos widget wConf = do
   cache2 <- liftIO $ withDraw $ \d -> do
     xftDrawSetClipRectangles d 0 0 [Rectangle (fi $ widgetX wConf) 0
                                     (fi $ widgetWidth wConf) (fi barHeight)]
-    draw foregroundColorString backgroundColorString pos input d cache
-  let gState2 = gState { getIconCache = cache2 }
-  put (gState2, widget) where
+    draw foregroundColorString backgroundColorString pos input d
+  return () where
     rs@(RenderState dpy w gc) = (getRenderState widget)
     scr = defaultScreen dpy
     vis = defaultVisual dpy scr
@@ -628,23 +646,26 @@ drawDzenXft font input pos (gState, widget) wConf = do
     withDraw action = withXftDraw dpy w vis colormap action
     withColor color action = withXftColorName dpy vis colormap color action
 
-    draw _ _ pos [] d ic = do
+    draw _ _ pos [] d = do
       let maxpos = (widgetX wConf) + (widgetWidth wConf)
       withColor backgroundColorString $ \c ->
         xftDrawRect d c pos 0 (maxpos - pos) barHeight
-      return ic
+      return ()
 
-    draw fg bg pos (Annotation Foreground fg' : xs) d ic = draw (withDefault foregroundColorString fg') bg pos xs d ic
-    draw fg bg pos (Annotation Background bg' : xs) d ic = draw fg (withDefault backgroundColorString bg') pos xs d ic
-    draw fg bg pos (IconRef winid : xs) d ic = do
-      ((CachedIcon width height img), ic2) <- makeImage ic (fi winid)
-      putImage dpy w gc img 0 0 (fi pos) 0 (fi width) (fi height)
-      draw fg bg (pos + width) xs d ic2
+    draw fg bg pos (Annotation Foreground fg' : xs) d = draw (withDefault foregroundColorString fg') bg pos xs d
+    draw fg bg pos (Annotation Background bg' : xs) d = draw fg (withDefault backgroundColorString bg') pos xs d
+    draw fg bg pos (IconRef winid : xs) d = do
+      case getIconImage (fi winid) iconCache  of
+        Nothing -> draw fg bg pos xs d
 
-    draw fg bg pos (Text msg : xs) d ic = do
+        Just (CachedIcon width height img) -> do
+          putImage dpy w gc img 0 0 (fi pos) 0 (fi width) (fi height)
+          draw fg bg (pos + width) xs d
+
+    draw fg bg pos (Text msg : xs) d = do
       glyphInfo <- xftTextExtents dpy font msg
       withColor bg $ drawRect d glyphInfo
       withColor fg $ drawText d glyphInfo
-      draw fg bg (pos + xglyphinfo_xOff glyphInfo) xs d ic where
+      draw fg bg (pos + xglyphinfo_xOff glyphInfo) xs d where
         drawText d glyphInfo c = xftDrawString d c font (pos + xglyphinfo_x glyphInfo) 18 msg
         drawRect d glyphInfo c = xftDrawRect d c pos 0 (xglyphinfo_xOff glyphInfo) barHeight

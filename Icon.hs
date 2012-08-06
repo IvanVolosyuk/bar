@@ -3,7 +3,8 @@ module Icon (
   CachedIcon(..),
   IconCache,
   makeIconCache,
-  makeImage
+  loadIconImage,
+  getIconImage
   ) where
 
 import Foreign.C.Types
@@ -82,14 +83,16 @@ getIconDataDefault mb = case mb of
   Just ic -> ic
   Nothing -> defaultIcon
 
-makeImage :: IconCache -> Window -> IO (CachedIcon, IconCache)
-makeImage c@(IconCache dpy atom cache cfg) win = do
+loadIconImage :: IconCache -> Window -> IO (IconCache)
+loadIconImage c@(IconCache dpy atom cache cfg) win = do
   case M.lookup win cache of
      Just cachedIcon -> do
         print "Using cached icon"
-        return (cachedIcon, c)
+        return c
      Nothing -> do
+       print "Start fetching icon data"
        iconRawData <- fetchIconData c win `catch` \x -> return $ Just defaultIcon
+       print "Stop fetching icon data"
        let iconRawData' = getIconDataDefault iconRawData
            icons = makeIconList $ iconRawData'
            icon = bestMatch (pickSize cfg) icons
@@ -102,7 +105,10 @@ makeImage c@(IconCache dpy atom cache cfg) win = do
                                               (fromIntegral height) 32 (fromIntegral 0)
        let cachedImage = CachedIcon width height img
        let newCache = c { getCache = M.insert win cachedImage cache }
-       return (cachedImage, newCache)
+       return newCache
+
+getIconImage :: Window -> IconCache -> Maybe CachedIcon
+getIconImage win cache = M.lookup win (getCache cache)
        
 
 chunksOf n [] = []
