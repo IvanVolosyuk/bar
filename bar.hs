@@ -6,11 +6,11 @@ import Control.Concurrent.Chan
 import Control.Monad.State
 import Data.Bits
 import Data.Time
+import Data.Maybe
 import Foreign.C
 import GHC.Ptr (nullPtr)
 import Graphics.X11.Xft
 import Graphics.X11.Xrender
-import Graphics.X11.Xshape
 import Numeric
 import System.Exit
 import Text.Printf (printf)
@@ -31,11 +31,12 @@ dzenMsg = "^fg(white)^bg(#2b4f98) 1 ^fg()^bg()^fg(black)^bg(#cccccc) 2 ^fg()^bg(
 
 padding = 4 :: Int
 barX = 0 :: Int
-barY = 768 - 24 - 1
+barY = 0
 barHeight = 24 :: Int
 barWidth = 1366 :: Int
 backgroundColor = 0xBEBEBE
-foregroundColor = 0x000000
+backgroundColorString = "#BEBEBE"
+foregroundColorString = "#000000"
 graphBackgroundColor = 0x181838
 cpuColorTable = [0x70FF70, 0xFF8080, 0xF020F0, 0x3030FF] -- FIXME: one color is unused
 memColorTable = [0x007F00, 0xFF0000, 0x0000FF]
@@ -63,8 +64,14 @@ loadWidgets = [ -- widget   width refresh
    (makeCpuWidget, 80, 1, wc),
    (makeMemWidget, 20, 10, wc),
    (makeBatteryhWidget, 100, 3, wc),
-   (makeNetWidget "wlan0", 40, 0.1, wc),
+   (makeNetWidget "wlan0", 40, 0.5, wc),
    (makeTitleWidget, 1028, 0, wc { drawFrame = False })
+   ]
+
+loadTooltipWidgets = [
+   (makeClockWidget, 60, 1, wc),
+   (makeCpuWidget, 80, 0.03, wc),
+   (makeNetWidget "wlan0", 80, 0.05, wc)
    ]
 
 height = barHeight - marginsVertical :: Int
@@ -72,30 +79,77 @@ height = barHeight - marginsVertical :: Int
 newtype IOBox a = IOBox { exec :: BoxIO a }
 type BoxIO a = IO (a, IOBox a)
 
-type ControlChan = Chan CInt
+type ControlChan = Chan (Window,CInt)
+
+type ExtendedState = (GlobalState, Widget)
+
+data WidgetConfig = WidgetConfig {
+  widgetWidth :: Int,
+  widgetId :: CInt,
+  refreshRate :: Int,
+  widgetX :: Int,
+  drawFrame :: Bool,
+  widgetTooltop :: WidgetLine
+  }
+defaultWidgetConfig = WidgetConfig {
+    widgetWidth = 100,
+    widgetId = 0,
+    refreshRate = 100000,
+    widgetX = 0,
+    drawFrame = True,
+    widgetTooltop = (makeCpuWidget, 60, 0.1, wc)
+    }
 
 data RenderState = RenderState { getDisplay :: Display, getDrawable::Pixmap, getGC :: GC}
-data WindowRenderState = WindowRenderState Window GC Pixmap GC
-data GlobalState = GlobalState { getRenderState :: RenderState,
-                                 getWindowRenderState :: WindowRenderState,
-                                 getIconCache :: IconCache,
+data WindowRenderState = WindowRenderState Window GC
+data GlobalState = GlobalState { getIconCache :: IconCache,
                                  getFont :: Either XftFont FontSet,
-                                 widgetsById :: M.Map CInt Widget,
-                                 widgetsToRedraw :: S.Set CInt
+                                 widgetsById :: M.Map Window (M.Map CInt Widget),
+                                 mainWindow :: Window,
+                                 tooltipWindow :: Maybe Window,
+                                 globalChan :: ControlChan
                                }
-                                 
+
+data Widget = Widget {
+    onMeasure :: StateT ExtendedState IO Int,
+    onDraw :: Int -> StateT ExtendedState IO (),
+    doUpdate :: StateT ExtendedState IO (),
+    onDestroy :: StateT ExtendedState IO (),
+    widgetConfig :: WidgetConfig,
+    getRenderState :: RenderState,
+    getWindowRenderState :: WindowRenderState
+}
+type MakeWidget = ControlChan -> Widget -> IO Widget
+type WidgetLine = (MakeWidget, Int, Double, WidgetConfig)
+
+data WidgetFunctions st = WidgetFunctions {
+    onMeasureFunc :: st -> StateT ExtendedState IO Int,
+    onDrawFunc :: st -> Int -> StateT ExtendedState IO (),
+    doUpdateFunc :: st -> StateT ExtendedState IO (),
+    onDestroyFunc :: st -> StateT ExtendedState IO ()
+}
+
+defaultFunctions = WidgetFunctions {
+  onMeasureFunc = simpleOnMeasure,
+  onDrawFunc = \_ _ -> return (),
+  doUpdateFunc = \_ -> return (),
+  onDestroyFunc = \_ -> return ()
+  }
+
+defaultWidget rs wrs wc = Widget {
+  onMeasure = return 1,
+  onDraw = \_ -> return (),
+  doUpdate = return (),
+  onDestroy = return (),
+  widgetConfig = wc,
+  getRenderState = rs,
+  getWindowRenderState = wrs
+  }
+
 fi :: (Integral a, Num b) => a -> b
 fi = fromIntegral
 
-drawWindow rs (WindowRenderState w gc shape shape_gc) = do
-  {- Shape mask, we don't probably need that
-  let shape_rs = RenderState (getDisplay rs) shape shape_gc
-  setfg shape_rs 0
-  fillRect shape_rs 0 0 barWidth barHeight -- FIXME: do we need transparency mask at all?
-  setfg shape_rs 1
-  fillRect shape_rs 0 0 barWidth barHeight
-  xshapeCombineMask (getDisplay rs) w shapeBounding 0 0 shape shapeSet -}
-
+drawWindow rs (WindowRenderState w gc) = do
   setfg rs backgroundColor
   fillRect rs 0 0 barWidth barHeight
 
@@ -112,7 +166,7 @@ drawAllWidgets gState widgets pos = do
   let widgetPos = pos - width - padding
   let widget2 = widget { widgetConfig = (widgetConfig widget) { widgetX = widgetPos } }
 
-  let rs = (getRenderState gState)
+  let rs = (getRenderState widget)
   setfg rs graphBackgroundColor
   fillRect rs widgetPos marginTop width (barHeight - marginsVertical)
   setfg rs 0xFFFFFF
@@ -125,46 +179,104 @@ data EventResult = Done | ExitEventLoop | Update GlobalState
 
 updateWindow = updateWindowRegion 0 barWidth
 
-updateWindowRegion x width gState = do
-  let RenderState dpy buf buf_gc = (getRenderState gState)
-  let WindowRenderState w gc _ _ = (getWindowRenderState gState)
+updateWindowRegion x width widget = do
+  let RenderState dpy buf buf_gc = (getRenderState widget)
+  let WindowRenderState w gc = (getWindowRenderState widget)
   copyArea dpy buf w gc x 0 (fi width) (fi barHeight)
                             (fi x) 0
   sync dpy False
 
+handleMessage :: GlobalState -> Event -> IO EventResult
 handleMessage _ (ClientMessageEvent {ev_data = (-1):_}) = return ExitEventLoop
-handleMessage gState (ClientMessageEvent {ev_data = widgetId:_}) = do
+handleMessage gState (ClientMessageEvent {ev_window = w, ev_data = widgetId:_}) = do
   -- print $ "Update for widget: " ++ (show widgetId)
-  let widgets = widgetsById gState
-  case M.lookup widgetId widgets of
-    Nothing -> return Done
-    Just widget -> do
-      (gState, widget) <- execStateT (doUpdate widget) (gState,widget)
-
-      let x = widgetX . widgetConfig $  widget
-      let wConf = widgetConfig widget
-      let width = widgetWidth wConf
-      when (drawFrame wConf) $ do
-        let rs = (getRenderState gState)
-        setfg rs graphBackgroundColor -- FIXME: move to widget draw?
-        fillRect rs x marginTop width (barHeight - marginsVertical)
-
-      (gState, widget) <- execStateT ((onDraw widget) x) (gState, widget) 
-      updateWindowRegion (fi x) (fi width) gState
-      return . Update $ gState { widgetsById = M.insert widgetId widget widgets }
+  let widgetsMap = widgetsById gState
+  case M.lookup w widgetsMap of
+   Nothing -> return Done
+   Just windowWidgetMap -> do
+     case M.lookup widgetId windowWidgetMap of
+       Nothing -> return Done
+       Just widget -> do
+         (gState, widget) <- execStateT (doUpdate widget) (gState,widget)
+   
+         let x = widgetX . widgetConfig $  widget
+         let wConf = widgetConfig widget
+         let width = widgetWidth wConf
+         when (drawFrame wConf) $ do
+           let rs = (getRenderState widget)
+           setfg rs graphBackgroundColor -- FIXME: move to widget draw?
+           fillRect rs x marginTop width (barHeight - marginsVertical)
+   
+         (gState, widget) <- execStateT ((onDraw widget) x) (gState, widget) 
+         updateWindowRegion (fi x) (fi width) widget
+         let windowWidgetMap' = M.insert widgetId widget windowWidgetMap
+         let widgetsMap' = M.insert w windowWidgetMap' widgetsMap
+         return . Update $ gState { widgetsById = widgetsMap' }
   
 handleMessage gState (ButtonEvent {ev_x = x}) = do
   return ExitEventLoop
 
-handleMessage gState (ExposeEvent {}) = do
-  drawWindow (getRenderState gState) (getWindowRenderState gState)
-  let widgets = M.toList . widgetsById $ gState
-  (gState, widgets) <- drawAllWidgets gState widgets (fi barWidth)
-  print "MapNotify: expensive redraw all"
-  updateWindow gState
-  return $ Update gState { widgetsById = M.fromList widgets }
+handleMessage gState (ExposeEvent {ev_window = w}) = do
+  let widgetsMap = widgetsById gState
+  case M.lookup w widgetsMap of
+    Nothing -> return Done
+    Just windowWidgetMap -> do
+      let widgets = M.toList windowWidgetMap
+      let (_,widget) = head widgets
+      drawWindow (getRenderState widget) (getWindowRenderState widget)
+      (gState, widgets) <- drawAllWidgets gState widgets (fi barWidth)
+      print "MapNotify: expensive redraw all"
+      updateWindow widget
+      return $ Update gState { widgetsById = M.insert w (M.fromList widgets) widgetsMap }
 
 handleMessage gState (MotionEvent {}) = return Done
+
+handleMessage gState (CrossingEvent {ev_event_type = 7, ev_window = ww, ev_event_display = dpy}) = do -- EnterNotify
+  liftIO $ print "Enter! Creating Window"
+  let scr = (defaultScreen dpy)
+  let visual = defaultVisual dpy scr
+      attrmask = cWOverrideRedirect
+  w <- allocaSetWindowAttributes $ \attributes -> do
+         set_override_redirect attributes True
+         createWindow dpy (defaultRootWindow dpy) (fi 0) (fi 25)
+                        (fi barWidth) (fi barHeight)
+                    0 copyFromParent inputOutput visual attrmask attributes
+
+  tooltopAtom <- internAtom dpy "_NET_WM_WINDOW_TYPE_TOOLTIP" False
+  winType <- internAtom dpy "_NET_WM_WINDOW_TYPE" False
+  changeProperty32 dpy w winType aTOM propModeReplace [fi tooltopAtom]
+
+  gc <- createGC dpy w
+  setBackground dpy gc (whitePixel dpy scr) -- FIXME: figure out if this is needed
+
+  buf <- createPixmap dpy w (fi barWidth) (fi barHeight) (defaultDepth dpy scr)
+  buf_gc <- createGC dpy buf
+  setBackground dpy gc backgroundColor
+  setLineAttributes dpy gc 1 lineSolid capRound joinRound -- FIXME: use sane attributes for performance
+
+  setBackground dpy gc (whitePixel dpy scr) -- FIXME: figure out if this is needed
+  setLineAttributes dpy gc 1 lineSolid capRound joinRound
+
+  selectInput dpy w (structureNotifyMask .|. exposureMask)
+  mapWindow dpy w
+
+  let rState = RenderState dpy buf buf_gc
+  let wrState = WindowRenderState w gc
+  widgets <- mapM (initWidget rState wrState (globalChan gState)) $ zip [1..] loadTooltipWidgets
+  let widgetsMap = (widgetsById gState)
+  let widgetsMap' = M.insert w (M.fromList widgets) widgetsMap
+  return . Update $ gState { widgetsById = widgetsMap', tooltipWindow = Just w }
+ 
+handleMessage gState (CrossingEvent {ev_event_type = 8, ev_window = ww, ev_event_display = dpy}) = do -- LeaveNotify
+  liftIO $ print "Leave! Destroying Window"
+  case tooltipWindow gState of
+    Nothing -> return Done
+    Just w -> do
+      let widgetsMap = widgetsById gState
+      let windowWidgetMap = fromMaybe M.empty (M.lookup w widgetsMap)
+      mapM (destroyWidget gState) . M.elems $ windowWidgetMap
+      destroyWindow dpy w
+      return . Update $ gState { widgetsById = M.delete w widgetsMap, tooltipWindow = Nothing }
 
 handleMessage gState (AnyEvent {ev_event_type = 14}) = return Done -- NoExpose
 
@@ -172,17 +284,16 @@ handleMessage _ event = (print $ "Unhandled event:" ++ (eventName event) ++ ": "
 
 eventMap = M.fromList eventTable
 
-eventLoop gState = do
-  let dpy = getDisplay . getRenderState $ gState
+eventLoop dpy gState = do
   allocaXEvent $ \ev -> do
     nextEvent dpy ev
     event <- getEvent ev
     -- print $ show $ event
-    mbrState <- handleMessage gState event
-    case mbrState of
+    res <- handleMessage gState event
+    case res of
       ExitEventLoop -> return ()
-      Done -> eventLoop gState
-      Update gState' -> eventLoop gState'
+      Done -> eventLoop dpy gState
+      Update gState' -> eventLoop dpy gState'
 
 sendClientEvent d a w val = do
     allocaXEvent $ \e -> do
@@ -191,19 +302,24 @@ sendClientEvent d a w val = do
          sendEvent d w False structureNotifyMask e
     sync d False
 
-copyChanToX chan w = do
+copyChanToX chan = do
   d   <- openDisplay ""
   a <- internAtom d "BAR_UPDATE" False
   forever $ do
-     x <- readChan chan
+     (w,x) <- readChan chan
      -- print $ "Copy to X: " ++ (show x)
-     sendClientEvent d a w (fi x)
+     sendClientEvent d a w (fi x) `catch`  \x -> do
+       print $ "Exception caught: " ++ (show x)
+       return ()
 
 inputReader chan = loopForever `catch` \x -> writeChan chan (-1) where
   loopForever = forever $ do
     line <- getLine
     print $ "Line: " ++ line
     writeChan chan 333
+
+errorHandler dpy err = do
+  print "X11 Error!"
 
 main = do
   dpy <- openDisplay "" -- FIXME: proper way to get display name
@@ -212,9 +328,9 @@ main = do
   w <- createWindow dpy (defaultRootWindow dpy) (fi barX) (fi barY)
                         (fi barWidth) (fi barHeight)
                     0 copyFromParent inputOutput visual 0 nullPtr
-  let strutValues = [0, 0, 0, fi barHeight :: CLong,
+  let strutValues = [0, 0, fi barHeight :: CLong, 0,
                      0, 0, 0, 0,
-                     0, 0, 0, 1360]
+                     0, 1360, 0, 0]
   strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
   changeProperty32 dpy w strutPartial cARDINAL propModeReplace strutValues
   strut <- internAtom dpy "_NET_WM_STRUT" False
@@ -225,16 +341,15 @@ main = do
   changeProperty32 dpy w winType aTOM propModeReplace [fi dockAtom]
 
 
+
   gc <- createGC dpy w
-  setBackground dpy gc (whitePixel dpy scr) -- FIXME: figure out if this is needed
+  setBackground dpy gc backgroundColor -- FIXME: figure out if this is needed
 
   buf <- createPixmap dpy w (fi barWidth) (fi barHeight) (defaultDepth dpy scr)
   buf_gc <- createGC dpy buf
   setBackground dpy gc backgroundColor
   setLineAttributes dpy gc 1 lineSolid capRound joinRound -- FIXME: use sane attributes for performance
 
-  shape <- createPixmap dpy w (fi barWidth) (fi barHeight) 1
-  shape_gc <- createGC dpy shape
   setBackground dpy gc (whitePixel dpy scr) -- FIXME: figure out if this is needed
   setLineAttributes dpy gc 1 lineSolid capRound joinRound
 
@@ -244,63 +359,37 @@ main = do
   mapWindow dpy w
 
   chan <- newChan
-  t1 <- forkOS $ copyChanToX chan w
+  setErrorHandler errorHandler
+  eventCopyThread <- forkOS $ copyChanToX chan
 
-  widgets <- mapM (initWidget chan) $ zip [1..] loadWidgets
+  let rState = RenderState dpy buf buf_gc
+  let wrState = WindowRenderState w gc
+  widgets <- mapM (initWidget rState wrState chan) $ zip [1..] loadWidgets
 
-  let rState = RenderState dpy buf buf_gc --dpy w shape gc shape_gc
-  let wrState = WindowRenderState w gc shape shape_gc
   font <- case fontXft of
     False -> createFontSet dpy fontName >>= \(_,_,fontSet) -> return $ Right fontSet
     True -> xftFontOpenXlfd dpy (defaultScreenOfDisplay dpy) fontName >>= return . Left
   iconCache <- makeIconCache dpy
-  let gState = GlobalState rState wrState iconCache font (M.fromList widgets) S.empty
-  eventLoop gState
+  let gState = GlobalState iconCache font (M.insert w (M.fromList widgets) M.empty) w Nothing chan
+  eventLoop dpy gState
   
-  killThread t1
-  mapM (destroyWidget gState) (M.toList . widgetsById $ gState)
-  freePixmap dpy shape
+  killThread eventCopyThread
+  mapM (destroyWidget gState) . concat . map M.elems . M.elems . widgetsById $ gState
   destroyWindow dpy w
   closeDisplay dpy
 
-destroyWidget gState (_,w) = runStateT (onDestroy w) (gState, w)
+destroyWidget gState w = runStateT (onDestroy w) (gState, w)
 
-initWidget :: ControlChan -> (CInt, (MakeWidget, Int, Double, WidgetConfig)) -> IO (CInt, Widget)
-initWidget chan (widgetId, (makeWidget, width, refresh, config)) = do
-  widget <- makeWidget chan config {
+initWidget :: RenderState -> WindowRenderState -> ControlChan -> 
+              (CInt, (MakeWidget, Int, Double, WidgetConfig)) -> IO (CInt, Widget)
+initWidget rs wrs chan (widgetId, (makeWidget, width, refresh, widgetConfig)) = do
+  let widgetSetup = defaultWidget rs wrs widgetConfig {
                 widgetWidth = width,
                 refreshRate = (truncate $ refresh * 1000000),
                 widgetId = widgetId }
+  widget <- makeWidget chan widgetSetup
   return (widgetId, widget)
 
-
-type ExtendedState = (GlobalState, Widget)
-
-data Widget = Widget {
-    onMeasure :: StateT ExtendedState IO Int,
-    onDraw :: Int -> StateT ExtendedState IO (),
-    doUpdate :: StateT ExtendedState IO (),
-    onDestroy :: StateT ExtendedState IO (),
-    widgetConfig :: WidgetConfig
-}
-type MakeWidget = ControlChan -> WidgetConfig -> IO Widget
-
-data WidgetFunctions st = WidgetFunctions {
-    onMeasureFunc :: st -> StateT ExtendedState IO Int,
-    onDrawFunc :: st -> Int -> StateT ExtendedState IO (),
-    doUpdateFunc :: st -> StateT ExtendedState IO (),
-    onDestroyFunc :: st -> StateT ExtendedState IO ()
-}
-
-defaultFunctions = WidgetFunctions {
-  onMeasureFunc = simpleOnMeasure,
-  onDrawFunc = \_ _ -> return (),
-  doUpdateFunc = \_ -> return (),
-  onDestroyFunc = \_ -> return ()
-  }
-
-data WidgetConfig = WidgetConfig { widgetWidth :: Int, widgetId :: CInt, refreshRate :: Int, widgetX :: Int, drawFrame :: Bool }
-defaultWidgetConfig = WidgetConfig { widgetWidth = 100, widgetId = 0, refreshRate = 100000, widgetX = 0, drawFrame = True }
 
 data CpuState = CpuState { samples :: [[Int]] }
 
@@ -310,20 +399,12 @@ simpleOnMeasure _ = do
   (_,widgetState) <- get
   return . widgetWidth . widgetConfig $ widgetState
 
-staticMessageDraw :: String -> () -> Int -> StateT ExtendedState IO ()
-staticMessageDraw text _ pos = do
-  (gState,widget) <- get
-  let (RenderState dpy w gc) = (getRenderState gState)
-  liftIO $ drawString dpy w gc (fi pos) 10 text
-
-
-wrapWidget functions widgetConfig state =
+wrapWidget functions widget state =
   let WidgetFunctions onM onD doU onDe = functions in
-  Widget { onMeasure = onM state,
+  widget { onMeasure = onM state,
            onDraw = onD state,
            doUpdate = doU state,
-           onDestroy = onDe state,
-           widgetConfig = widgetConfig }
+           onDestroy = onDe state }
 
 makeSegment (x,y) = Segment x' y0' x' y1' where
   x' = fi x
@@ -366,8 +447,8 @@ readBatteryFile = readKeyValueFile head
 readNetFile = readKeyValueFile $ map read
 
 
-runBackgroundTask :: ControlChan -> WidgetConfig -> BoxIO a -> IO (Chan a, ThreadId)
-runBackgroundTask masterChan config boxio = do
+runBackgroundTask :: ControlChan -> Window -> WidgetConfig -> BoxIO a -> IO (Chan a, ThreadId)
+runBackgroundTask masterChan w config boxio = do
   clientChan <- newChan -- FIXME: chan get rid of clientChan parameter?
   threadId <- forkOS $ thread clientChan boxio
   return (clientChan, threadId) where
@@ -376,7 +457,7 @@ runBackgroundTask masterChan config boxio = do
     thread clientChan boxio = do
       (output, box2) <- boxio
       -- print $ "bgTask sends: " ++ (show n)
-      writeChan masterChan n
+      writeChan masterChan (w, n)
       writeChan clientChan output
       threadDelay refresh
       thread clientChan (exec box2)
@@ -394,11 +475,13 @@ statelessBox newState = makeBox (return ()) $ \_ -> do
   st <- newState
   return (st, ())
 
-makeWidgetWithThread makeInitialState makeThread prepareData drawData masterChan config = do
-  let initialState = makeInitialState config
-  (clientChan, threadId) <- runBackgroundTask masterChan config makeThread
+makeWidgetWithThread makeInitialState makeThread prepareData drawData masterChan widgetSetup = do
+  let config = widgetConfig widgetSetup
+      initialState = makeInitialState config
+      (WindowRenderState win _) = getWindowRenderState widgetSetup
+  (clientChan, threadId) <- runBackgroundTask masterChan win config makeThread
   let state = (initialState, clientChan, threadId)
-  return $ wrapWidget functions config state where
+  return $ wrapWidget functions widgetSetup state where
     functions = defaultFunctions { onDrawFunc = draw, doUpdateFunc = update, onDestroyFunc = destroy }
     draw (widgetState,_,_) pos = drawData widgetState pos
     update state = do
@@ -406,7 +489,7 @@ makeWidgetWithThread makeInitialState makeThread prepareData drawData masterChan
       let (widgetState, chan, threadId) = state
       newSample <- liftIO $ readChan chan
       let newWidgetState = prepareData widgetState newSample
-      put (gState, wrapWidget functions (widgetConfig widget) (newWidgetState, chan, threadId))
+      put (gState, wrapWidget functions widget (newWidgetState, chan, threadId))
     destroy (_,_,threadId) = liftIO $ killThread threadId
 
 dropZeros [] = []
@@ -418,10 +501,10 @@ makeGraphWidget colorTable makeThread =
     initialState config = replicate (length colorTable) $ replicate (widgetWidth config) 0
     prepareData state newSample = updateGraph state newSample
     drawData graph pos = do
-      (gState, _) <- get
+      (gState, widget) <- get
       let segments = map (\a -> map makeSegment $ dropZeros $ zip [pos..] a) graph -- FIXME: segments using x position
       -- liftIO . print . show . map head . map reverse $ segments
-      let rs = getRenderState gState
+      let rs = getRenderState widget
       liftIO $ drawColorSegments rs $ zip segments colorTable
 
 makeCpuWidget :: MakeWidget
@@ -443,8 +526,8 @@ makeMemWidget = makeGraphWidget memColorTable makeThread where
     return $ makeMemSample memState
 
 makeNetWidget :: String -> MakeWidget
-makeNetWidget dev masterChan config = makeGraphWidget netColorTable
-                                      makeThread masterChan config where
+makeNetWidget dev masterChan widgetSetup = makeGraphWidget netColorTable
+                                      makeThread masterChan widgetSetup where
   makeThread = makeBox (liftIO $ readNetFile "/proc/net/dev") $ \netState -> do
     newNetState <- liftIO $ readNetFile "/proc/net/dev"
     let netDelta = delta (newNetState ! dev) (netState ! dev)
@@ -453,6 +536,7 @@ makeNetWidget dev masterChan config = makeGraphWidget netColorTable
   f x = log (x + 1)
   f2 x = (f x) * (f x)
   maxF = (*2) . f2 . (*10) . fi $ (refreshRate config) -- max rate 10 Mb/s
+  config = widgetConfig widgetSetup
   makeNetSample input = map (makeLine total) values where
     atIndex idx = f2 . fi $ input !! idx
     inbound = atIndex 0
@@ -461,8 +545,8 @@ makeNetWidget dev masterChan config = makeGraphWidget netColorTable
     values = map truncate [maxF, maxF - inbound, outbound] :: [Int]
 
 drawText msg pos = do
-  (gState, _) <- get
-  let rs@(RenderState dpy w gc) = (getRenderState gState)
+  (gState, widget) <- get
+  let rs@(RenderState dpy w gc) = (getRenderState widget)
   liftIO $ do
     setbg rs graphBackgroundColor
     setfg rs 0xC7AE86
@@ -507,10 +591,10 @@ makeClockWidget =
 
 makeTitleWidget masterChan = 
   makeWidgetWithThread initialState makeThread prepareData drawData masterChan where
-    initialState config = [ IconRef 0x300002b ] -- FIXME
+    initialState config = []
     prepareData state newMsg = newMsg
     drawData = drawDzen
-    exit _ = writeChan masterChan (-1) >> return ""
+    exit _ = writeChan masterChan (0, -1) >> return ""
     makeThread = statelessBox $ do
       line <- getLine `catch` exit
       let annotated = parseLine line
@@ -534,10 +618,10 @@ drawDzenXft font input pos (gState, widget) wConf = do
   cache2 <- liftIO $ withDraw $ \d -> do
     xftDrawSetClipRectangles d 0 0 [Rectangle (fi $ widgetX wConf) 0
                                     (fi $ widgetWidth wConf) (fi barHeight)]
-    draw "#000000" "#BEBEBE" pos input d cache
+    draw foregroundColorString backgroundColorString pos input d cache
   let gState2 = gState { getIconCache = cache2 }
   put (gState2, widget) where
-    rs@(RenderState dpy w gc) = (getRenderState gState)
+    rs@(RenderState dpy w gc) = (getRenderState widget)
     scr = defaultScreen dpy
     vis = defaultVisual dpy scr
     colormap = defaultColormap dpy scr
@@ -546,12 +630,12 @@ drawDzenXft font input pos (gState, widget) wConf = do
 
     draw _ _ pos [] d ic = do
       let maxpos = (widgetX wConf) + (widgetWidth wConf)
-      withColor "#BEBEBE" $ \c ->
+      withColor backgroundColorString $ \c ->
         xftDrawRect d c pos 0 (maxpos - pos) barHeight
       return ic
 
-    draw fg bg pos (Annotation Foreground fg' : xs) d ic = draw (withDefault "#000000" fg') bg pos xs d ic
-    draw fg bg pos (Annotation Background bg' : xs) d ic = draw fg (withDefault "#BEBEBE" bg') pos xs d ic
+    draw fg bg pos (Annotation Foreground fg' : xs) d ic = draw (withDefault foregroundColorString fg') bg pos xs d ic
+    draw fg bg pos (Annotation Background bg' : xs) d ic = draw fg (withDefault backgroundColorString bg') pos xs d ic
     draw fg bg pos (IconRef winid : xs) d ic = do
       ((CachedIcon width height img), ic2) <- makeImage ic (fi winid)
       putImage dpy w gc img 0 0 (fi pos) 0 (fi width) (fi height)
