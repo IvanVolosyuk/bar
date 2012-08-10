@@ -50,7 +50,7 @@ import Foreign.Marshal.Array (peekArray)
 import Foreign.Storable (peek, peekByteOff)
 import Data.HashTable (hashString)
 import System.Directory (doesFileExist)
-import Icon
+import Utils
 
 foreign import ccall "dynamic" openDisplay__ :: FunPtr XOpenDisplayFunc -> XOpenDisplayFunc
 foreign import ccall "dynamic" closeDisplay__ :: FunPtr XCloseDisplayFunc -> XCloseDisplayFunc
@@ -79,9 +79,6 @@ colorGen n prefix = case n of
 
 formatColor :: (String,String) -> String
 formatColor (col,ch) = printf "\"%s c #%s\"" ch col
-
-join sep [] = ""
-join sep (x:xs) = foldl (\x y ->  x++sep++y ) x xs
 
 formatXPM :: String -> Bitmap [Word8] -> String
 formatXPM bg (Bitmap width height px) = image where
@@ -259,8 +256,6 @@ instance Math Int where
   mul a x = a * x
   normalize a x = x `div` a
   add x y = x + y
-
-pair op (a,b) = op a b
 
 instance (Math a) => Math [a] where
   mul a xs = map (mul a) $ xs

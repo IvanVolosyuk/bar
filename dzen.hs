@@ -20,6 +20,8 @@ import System.Directory (doesFileExist)
 import Xpm
 import Data.HashTable (hashString)
 
+import Utils
+
 height = 22
 padding = 4
 maxUpdatesPerSecond = 60
@@ -83,21 +85,6 @@ bar :: Int -> String
   dzenMove = printf "^p(%d)"
   dzenColor = printf "^fg(%s)%s^fg()"
   dzenBar h = printf "^pa(;%d)^r(1x%d)" (height-h + 1) (h::Int)
-
-split :: Char -> String -> [String]
-split ch s =  case dropWhile (==ch) s of
-  "" -> []
-  s' -> word : split ch s''
-    where (word, s'') = break (==ch) s'
-
-strip :: String -> String
-strip s = reverse . dropWhile p . reverse . dropWhile p $ s where
-  p = (==' ')
-
-split1 ch s = (x, safeTail xs) where
-  safeTail [] = []
-  safeTail (x:xs) = xs
-  (x,xs) = break (==ch) s
 
 updateGraph samples sample = newSamples where
   newSamples = map (\(n,o) -> o++[n]) $ zip sample $ map (drop 1) samples
