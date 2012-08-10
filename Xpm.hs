@@ -50,6 +50,7 @@ import Foreign.Marshal.Array (peekArray)
 import Foreign.Storable (peek, peekByteOff)
 import Data.HashTable (hashString)
 import System.Directory (doesFileExist)
+import Utils
 
 foreign import ccall "dynamic" openDisplay__ :: FunPtr XOpenDisplayFunc -> XOpenDisplayFunc
 foreign import ccall "dynamic" closeDisplay__ :: FunPtr XCloseDisplayFunc -> XCloseDisplayFunc
@@ -78,9 +79,6 @@ colorGen n prefix = case n of
 
 formatColor :: (String,String) -> String
 formatColor (col,ch) = printf "\"%s c #%s\"" ch col
-
-join sep [] = ""
-join sep (x:xs) = foldl (\x y ->  x++sep++y ) x xs
 
 formatXPM :: String -> Bitmap [Word8] -> String
 formatXPM bg (Bitmap width height px) = image where
@@ -259,8 +257,6 @@ instance Math Int where
   normalize a x = x `div` a
   add x y = x + y
 
-pair op (a,b) = op a b
-
 instance (Math a) => Math [a] where
   mul a xs = map (mul a) $ xs
   normalize a xs = map (normalize a) $ xs
@@ -269,6 +265,7 @@ instance (Math a) => Math [a] where
 scale1D newsize a = map (normalize size) . scale size newsize $ a where
   size = length a
 
+scale2D :: Int -> Int -> Int -> [[Int]] -> [[Int]]
 scale2D w h newsize = concat . (normalize (w * h)) . scale h newsize
                    . (map $ scale w newsize) . chunksOf w
 
@@ -277,13 +274,10 @@ scaleNearest sz (Bitmap w h px ) = Bitmap sz sz . concat
      . scaleSimple w sz . (map $ scaleSimple w sz) . chunksOf w $ px
 
 scaleLinear sz (Bitmap w h px) = Bitmap sz sz
-      . cast_w8 . scale2D w h sz . cast_int $ px
+      . cast . scale2D w h sz . cast $ px
 
-cast_int :: [[Word8]] -> [[Int]]
-cast_int = map (map fromIntegral)
-
-cast_w8 :: [[Int]] -> [[Word8]]
-cast_w8 = map (map fromIntegral)
+cast :: (Integral a, Num b) => [[a]] -> [[b]]
+cast = map (map fromIntegral)
 
 black [r,g,b,a] = [0,0,0,a]
 none [r,g,b,a] = [0,0,0,0]
