@@ -31,13 +31,11 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Map ((!))
 
-dzenMsg = "^fg(white)^bg(#2b4f98) 1 ^fg()^bg()^fg(black)^bg(#cccccc) 2 ^fg()^bg()^fg(black)^bg(#cccccc) 3 ^fg()^bg()^fg(black)^bg(#cccccc) 9 ^fg()^bg()  ^fg(#202020){56623107}dzen.sh (~/.xmonad/ivan) - GVIM^fg()"
-
 defaultPadding = 4 :: Int
 barX = 0 :: Int
 barY = 0
 barHeight = 24 :: Int
-barWidth = 1366 :: Int
+barWidth = 2562 :: Int
 backgroundColor = 0xBEBEBE
 backgroundColorString = "#BEBEBE"
 foregroundColorString = "#000000"
@@ -55,11 +53,11 @@ textPadding = 2
 wc = defaultWidget
 loadWidgets :: [WidgetConfig]
 loadWidgets = [
-   clock,
+   clock { timeFormat = "%R" },
    cpu,
-   mem,
-   battery,
-   (net "wlan0") { widgetWidth = 40, refreshRate = 0.5 },
+   mem { refreshRate = 120 },
+   -- battery,
+   (net "eth0") { widgetWidth = 40, refreshRate = 0.5 },
    title { widgetX = 10 }
    ]
 
@@ -88,12 +86,12 @@ defaultTooltip = defaultWidget {
    textColor = "#000000" }
 
 cpu = defaultWidget { makeWidget = makeZCpuWidget, widgetTooltip = Just cpuTopTooltip }
-mem = defaultWidget { makeWidget = makeZMemWidget, colorTable = memColorTable, widgetTooltip = Just memTooltip }
+mem = defaultWidget { makeWidget = makeZMemWidget, colorTable = memColorTable, widgetTooltip = Nothing }
 clock = defaultWidget { makeWidget = makeZClockWidget, widgetTooltip = Just clockTooltip }
 battery = defaultWidget { makeWidget = makeZBatteryWidget, widgetWidth = 100, refreshRate = 3,
 			   widgetTooltip = Just batteryTooltip }
 
-net dev = defaultWidget { makeWidget = makeZNetWidget "wlan0", 
+net dev = defaultWidget { makeWidget = makeZNetWidget dev, 
                           colorTable = netColorTable,
                           widgetTooltip = Just $ netTooltip dev }
 title = defaultWidget { makeWidget = makeZTitleWidget, refreshRate = 0, drawFrame = False }
