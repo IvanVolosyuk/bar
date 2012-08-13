@@ -63,7 +63,7 @@ loadWidgets = [
    cpu,
    mem,
    battery,
-   (net "wlan0") { widgetWidth = 40, refreshRate = 0.5 },
+   (net "wlan0") { widgetWidth = 40, refreshRate = 1 },
    trayer,
    title { widgetX = 10 }
    ]
