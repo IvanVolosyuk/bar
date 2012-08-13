@@ -61,7 +61,7 @@ loadWidgets = [
    cpu,
    mem { refreshRate = 120 },
    -- battery,
-   (net "eth0") { widgetWidth = 40, refreshRate = 0.5 },
+   (net "eth0") { widgetWidth = 40, refreshRate = 1 },
    trayer,
    title { widgetX = 10 }
    ]
