@@ -1,11 +1,12 @@
 
 module Top (
-  makeCpuMap,
-  makeCpuDiff
+  pickCpuUsage,
+  makeCpuDiff,
+  memInfo
   ) where
 
 
-import Directory
+import System.Directory
 import Data.Char
 import Text.Printf
 import qualified Data.Map as M
@@ -14,34 +15,83 @@ import Data.Function
 import Data.List
 import Utils
 
-cpuStat file = (pid, usage) where
-  w = words file
-  pid = head w
-  usage = sum . map read . take 3 . drop 13 $ w
+{-
+0 pid           process id
+1 tcomm         filename of the executable
+2 state         state (R is running, S is sleeping, D is sleeping in an
+                uninterruptible wait, Z is zombie, T is traced or stopped)
+3 ppid          process id of the parent process
+4 pgrp          pgrp of the process
+5 sid           session id
+6 tty_nr        tty the process uses
+7 tty_pgrp      pgrp of the tty
+8 flags         task flags
+9 min_flt       number of minor faults
+10cmin_flt      number of minor faults with child's
+11maj_flt       number of major faults
+12cmaj_flt      number of major faults with child's
+13utime         user mode jiffies
+14stime         kernel mode jiffies
+15cutime        user mode jiffies with child's
+16cstime        kernel mode jiffies with child's
+17priority      priority level
+18nice          nice level
+19num_threads   number of threads
+20it_real_value	(obsolete, always 0)
+21start_time    time the process started after system boot
+22vsize         virtual memory size
+23rss           resident set memory size
+24rsslim        current limit in bytes on the rss
+-}
 
-perSec :: Double -> Integer -> Integer
-perSec sec val = truncate $ (fi val) / sec
+valuePicker selector file = (pid, (name, usage)) where
+  w@(pid:name:_) = words file
+  usage = selector w
 
 makeCpuDiff newCpuInfo cpuInfo sec = do
-  let diff = M.differenceWith (\a b -> Just $ a - b) newCpuInfo cpuInfo
-  let active = M.filter ( /= 0 ) diff
-  let sorted = take 3 . reverse . sortBy (compare `on` snd) $ M.toList active
-  files <- mapM (readFile . printf "/proc/%s/stat" . fst) sorted
-  let names = map ((!!1) . words) files :: [String]
-  return $ map (pair $ printf "   %2d%% - %s") $ zip (map ((perSec sec) . snd) sorted) names :: IO [String]
+  let diff = M.elems $ M.differenceWith (\(n,a) (_,b) -> Just $ (n,a - b)) newCpuInfo cpuInfo
+  let active = filter ( (/= 0) . snd) diff
+  print $ show active
+  let sorted = take 3 . reverse . sortBy (compare `on` snd) $ active
+  return $ map output sorted where
+    output (name, val) = printf "   %2d%% - %s" (perSec sec val) name
 
-makeCpuMap :: IO (M.Map String Integer)
-makeCpuMap = do
+readFiles [] = return []
+readFiles (pid:pids) = do
+  content <- (readFile pid >>= return . Just) `catch` \_ -> return Nothing
+  case content of
+    Nothing -> readFiles pids
+    Just c -> do
+      others <- readFiles pids
+      return $ (c:others)
+  
+pickCpuUsage :: IO (M.Map String (String, Int))
+pickCpuUsage = pickProcValues cpuSelector >>= return . M.fromList
+
+pickProcValues selector = do
   x <- getDirectoryContents "/proc"
   let pids = map (printf "/proc/%s/stat") $ filter (isDigit . head) $ x :: [String]
-  files <- mapM readFile pids
-  return $! M.fromList $ map cpuStat files
+  files <- readFiles pids
+  return $! map (valuePicker selector) files
+
+memInfo = do
+  mem <- pickProcValues memSelector :: IO [(String, (String, Int))]
+  return $! map display . take 4 . reverse . sortBy (compare `on` snd) . map (snd) $ mem where
+    display (name, val) = printf " %7s - %s" (bytes val) name :: String
+  
+
+cpuSelector = sum . map read . take 2 . drop 13
+memSelector = (*4096) . read . head . drop 23 :: [String] -> Int
+
+main2 = do
+  cpuInfo <- pickCpuUsage
+  threadDelay 1000000
+  newCpuInfo <- pickCpuUsage
+  makeCpuDiff newCpuInfo cpuInfo 1 :: IO [String]
+  threadDelay 1000000
+  newCpuInfo <- pickCpuUsage
+  makeCpuDiff newCpuInfo cpuInfo 2 :: IO [String]
 
 main = do
-  cpuInfo <- makeCpuMap
-  threadDelay 1000000
-  newCpuInfo <- makeCpuMap
-  makeCpuDiff newCpuInfo cpuInfo 1
-  threadDelay 1000000
-  newCpuInfo <- makeCpuMap
-  makeCpuDiff newCpuInfo cpuInfo 2
+  m <- memInfo
+  print $ show m

@@ -6,8 +6,14 @@ module Utils (
   split1,
   strip,
   fi,
-  loop
+  loop,
+  bytes,
+  perSec,
+  readKeyValueFile
   ) where
+
+import Text.Printf
+import qualified Data.Map as M
 
 pair op (a,b) = op a b
 join sep [] = ""
@@ -34,4 +40,21 @@ fi = fromIntegral
 loop f input = do
   output <- f input
   loop f output
+
+bytes :: Int -> String
+bytes b 
+  | b < 1024 = printf "%d bytes" b
+  | b < (1024 * 1024) = printf "%d KiB" (b `div` 1024)
+  | b < (10 * 1024 * 1024) = printf "%.1f MB" (bf / (1024 * 1024))
+  | b >= (10 * 1024 * 1024) = printf "%d MB" (b `div` (1024 * 1024)) where
+    bf = fromIntegral b :: Double
+
+readKeyValueFile pp filename = readFile filename >>= return . makeMap where
+  makeMap l = M.fromList $ map parseLine . lines $ l
+  parseLine l = (strip k, pp $ v) where
+     (k,v) = split1 ':' l
+
+perSec :: (Integral i) => Double -> i -> i
+perSec sec val = truncate $ (fi val) / sec
+
 

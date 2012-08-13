@@ -96,13 +96,8 @@ makeLine total = bar . (`div` safe total) . (* height)
 
 getCpuData = readFile "/proc/stat" >>= return . map(read) . words . head . lines
 
-readKeyValueFile pp filename = readFile filename >>= return . makeMap where
-  makeMap l = fromList $ map parseLine . lines $ l
-  parseLine l = (strip k, pp . words $ v) where
-     (k,v) = split1 ':' l
-
-readBatteryFile = readKeyValueFile head
-readNetFile = readKeyValueFile $ map read
+readBatteryFile = readKeyValueFile $ head . words
+readNetFile = readKeyValueFile $ map read . words
 
 newtype IOBox = IOBox { exec :: IO (String, IOBox) }
 type BoxIO = IO (String, IOBox)
