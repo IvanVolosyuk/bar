@@ -17,6 +17,7 @@ import Numeric
 import System.Exit
 import Text.Printf (printf)
 import System.Locale
+import System.Process (runCommand, terminateProcess)
 
 import DzenParse
 import Icon
@@ -49,8 +50,11 @@ marginTop = 1 :: Int
 marginBottom = 1 :: Int
 marginsVertical = marginTop + marginBottom :: Int
 defaultFontName = "-*-fixed-medium-r-normal--15-*-*-*-*-*-iso10646-*"
+fixedFontName = "-*-courier new-*-r-normal-*-17-*-*-*-*-*-*-*"
 defaultTimeFormat = "%R"
 textPadding = 2
+trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
+             \ --widthtype request --height %d --margin %d" height rightMargin
 
 wc = defaultWidget
 loadWidgets :: [WidgetConfig]
@@ -60,6 +64,7 @@ loadWidgets = [
    mem,
    battery,
    (net "wlan0") { widgetWidth = 40, refreshRate = 0.5 },
+   trayer,
    title { widgetX = 10 }
    ]
 
@@ -77,19 +82,22 @@ defaultWidget = WidgetConfig {
     frameBackgroundColor = frameBackground,
     textColor = "#C7AE86",
     colorTable = [0x70FF70, 0xFF8080, 0xF020F0, 0x3030FF],
-    timeFormat = defaultTimeFormat
+    timeFormat = defaultTimeFormat,
+    onClick = Nothing
     }
 
 defaultTooltip = defaultWidget {
-   refreshRate = 0.03,
-   widgetWidth = 250,
+   refreshRate = 3,
+   widgetWidth = 350,
    frameBackgroundColor = "#FFFFC0",
    widgetPadding = 0,
-   textColor = "#000000" }
+   textColor = "#000000",
+   fontName = fixedFontName}
 
-cpu = defaultWidget { makeWidget = makeZCpuWidget, widgetTooltip = Just cpuTopTooltip }
-mem = defaultWidget { makeWidget = makeZMemWidget, colorTable = memColorTable, widgetTooltip = Just memTooltip }
-clock = defaultWidget { makeWidget = makeZClockWidget, widgetTooltip = Just clockTooltip }
+cpu = defaultWidget { makeWidget = makeZCpuWidget, widgetTooltip = Just cpuTopTooltip, onClick = Just "top.sh" }
+mem = defaultWidget { makeWidget = makeZMemWidget, colorTable = memColorTable,
+                      widgetTooltip = Just memTooltip, refreshRate = 120, onClick = Just "top.sh" }
+clock = defaultWidget { makeWidget = makeZClockWidget, widgetTooltip = Just clockTooltip, onClick = Just "clock.sh" }
 battery = defaultWidget { makeWidget = makeZBatteryWidget, widgetWidth = 100, refreshRate = 3,
 			   widgetTooltip = Just batteryTooltip }
 
@@ -97,13 +105,14 @@ net dev = defaultWidget { makeWidget = makeZNetWidget "wlan0",
                           colorTable = netColorTable,
                           widgetTooltip = Just $ netTooltip dev }
 title = defaultWidget { makeWidget = makeZTitleWidget, refreshRate = 0, drawFrame = False }
+trayer = defaultWidget { makeWidget = makeZTrayer }
 
-clockTooltip = defaultTooltip { makeWidget = makeZClockWidget, refreshRate = 1, timeFormat = "%a, %e %b %Y - %X"}
-cpuTooltip = defaultTooltip { makeWidget = makeZCpuWidget }
-memTooltip = defaultTooltip { makeWidget = makeZMemWidget }
-netTooltip dev = defaultTooltip { makeWidget = makeZNetInfo dev, refreshRate = 2, widgetWidth = 300 }
-cpuTopTooltip = defaultTooltip { makeWidget = makeZCpuTop, widgetHeight = barHeight * 4, widgetWidth = 200, refreshRate = 3 }
-batteryTooltip = defaultTooltip { makeWidget = makeZBatteryRate, refreshRate = 5, widgetWidth = 215 }
+clockTooltip = defaultTooltip { makeWidget = makeZClockWidget, refreshRate = 1, widgetWidth = 300,
+                                timeFormat = "%a, %e %b %Y - %X"}
+memTooltip = defaultTooltip { makeWidget = makeZMemInfo, refreshRate = 3, widgetWidth = 450, widgetHeight = barHeight * 4 }
+netTooltip dev = defaultTooltip { makeWidget = makeZNetInfo dev, refreshRate = 3, widgetWidth = 400, widgetHeight = barHeight * 2 }
+cpuTopTooltip = defaultTooltip { makeWidget = makeZCpuTop, widgetHeight = barHeight * 4, widgetWidth = 270, refreshRate = 3 }
+batteryTooltip = defaultTooltip { makeWidget = makeZBatteryRate, refreshRate = 5, widgetWidth = 300 }
 
 placeWidgets pos [] = [] -- FIXME: get rid of magic?
 placeWidgets pos [last] = last { widgetWidth = pos - (widgetX last) }:[] -- last widget takes remaining space
@@ -139,7 +148,8 @@ data WidgetConfig = WidgetConfig {
   frameBackgroundColor :: String, 
   textColor :: String,
   colorTable :: [Pixel],
-  timeFormat :: String
+  timeFormat :: String,
+  onClick :: Maybe String
   }
 data RenderState = RenderState { getDisplay :: Display, getDrawable::Pixmap, getGC :: GC}
 data WindowRenderState = WindowRenderState { getRealWindow :: Window, getRealWindowGC :: GC }
@@ -202,8 +212,19 @@ handleMessage gState (ClientMessageEvent {ev_window = w, ev_data = widgetId:_}) 
          let widgetsMap' = M.insert w windowWidgetMap' widgetsMap
          return . Update $ gState { widgetsById = widgetsMap' }
   
-handleMessage gState (ButtonEvent {ev_x = x}) = do
-  return ExitEventLoop
+handleMessage gState (ButtonEvent {ev_x = pos, ev_window = ww}) = do
+  let widgetsMap = widgetsById gState
+  case M.lookup ww widgetsMap of
+    Nothing -> return Done
+    Just windowWidgetMap -> do
+      let mbWidget = find (containsPoint pos) $ M.toList windowWidgetMap
+      case mbWidget of
+        Nothing ->  return Done
+        Just (widgetId, widget) -> do
+           let cmd = onClick . widgetConfig $ widget
+           case cmd of
+             Nothing -> return Done
+             Just cmdLine -> runCommand cmdLine >> return Done
 
 handleMessage gState (ExposeEvent {ev_window = w}) = do
   let widgetsMap = widgetsById gState
@@ -406,13 +427,8 @@ accumulate = scanl (+)
 safe total = if total /= 0 then total else 1
 makeLine total = fi . (`div` safe total) . (* (height - 1))
 
-readKeyValueFile pp filename = readFile filename >>= return . makeMap where
-  makeMap l = M.fromList $ map parseLine . lines $ l
-  parseLine l = (strip k, pp . words $ v) where
-     (k,v) = split1 ':' l
-
-readBatteryFile = readKeyValueFile head
-readNetFile = readKeyValueFile $ map read
+readBatteryFile = readKeyValueFile $ head . words
+readNetFile = readKeyValueFile $ map read . words
 
 dropZeros [] = []
 dropZeros ((i,0):xs) = dropZeros xs
@@ -442,17 +458,25 @@ zAddFrame (config, rs, wrs, ch) z = return $ z { zOnDraw = draw' } where
     fillRect rs x marginTop width ((widgetHeight config) - marginsVertical)
 
 
-zThread makeState run global@(config, rs, wrs, ch) localChan = do
-  state <- makeState
-  loop state where
-    refresh = truncate $ 1000000 * refreshRate config
-    loop state = do
-      (output, newstate) <- run state
+zThreadWithIntervals firstIntervals makeState run global@(config, rs, wrs, ch) localChan = do
+  time <- getCurrentTime
+  state <- makeState >>= \x -> return $! x
+  let intervals = firstIntervals ++ (repeat $ refreshRate config)
+  
+  loop intervals time state where
+    loop (interval:intervals) time state = do
+      threadDelay (truncate $ 1000000 * interval)
+      newTime <- getCurrentTime
+      let dt = getDt newTime time
+      (output, newstate) <- run dt state >>= \x -> return $! x
       writeChan ch ((getRealWindow wrs), (widgetId config))
       writeChan localChan output
       -- print $ "Delay: " ++ (show refresh)
-      threadDelay refresh
-      loop newstate
+      loop intervals newTime newstate
+
+zThread makeState run global@(config, rs, wrs, ch) localChan =
+ zThreadWithIntervals [0.0] makeState run' global localChan where
+    run' = \_ -> run
 
 zStatelessThread run = zThread (return ()) wrappedRun where
   wrappedRun _ = run >>= \output -> return (output, ())
@@ -525,6 +549,11 @@ makeMemSample input = map (makeLine total) values where
   total:free:cached:active:[] = map (read . (input !)) ["MemTotal", "MemFree", "Cached", "Active"]
   values = [total - free, total - free - cached, active]
 
+getNetBytes input = [inbound, outbound] where
+  atIndex idx = fi $ input !! idx
+  inbound = atIndex 0
+  outbound = atIndex 8
+
 zNetWidget dev global@(config, rs, wrs, ch) z = 
   zAddThreadFilter (thr, val) global z >>= zGraphDisplayFilter global where
     val = replicate 3 0
@@ -537,9 +566,7 @@ zNetWidget dev global@(config, rs, wrs, ch) z =
     f2 x = (f x) * (f x)
     maxF = (*2) . f2 $ 10000000 * refreshRate config -- max rate 10 Mb/s
     makeNetSample input = map (makeLine total) values where
-      atIndex idx = f2 . fi $ input !! idx
-      inbound = atIndex 0
-      outbound = atIndex 8
+      [inbound, outbound] = map f2 . getNetBytes $ input
       total = truncate maxF
       values = map truncate [maxF, maxF - inbound, outbound] :: [Int]
 
@@ -677,38 +704,10 @@ zBatteryWidget global@(config, rs, wrs, ch) z =
 zBatteryRateWidget global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thr, "") global z >>= zTextDisplayFilter global where
     thr = zStatelessThread $ do
-      batteryState <- readBatteryFile "/proc/acpi/battery/BAT0/state"
-      return . printf " Present Rate: %s mW" $ batteryState ! "present rate"
+      batteryState <- readKeyValueFile strip "/proc/acpi/battery/BAT0/state"
+      return . printf " Present Rate: %s" $ batteryState ! "present rate"
 
-bytes :: Int -> String
-bytes b 
-  | b < 1024 = printf "%d bytes" b
-  | b < (1024 * 1024) = printf "%d KiB" (b `div` 1024)
-  | b < (1024 * 1024 * 1024) = printf "%d MB" (b `div` (1024 * 1024))
-
-zNetInfoWidget dev global@(config, rs, wrs, ch) z = 
-  zAddThreadFilter (thread, "...") global z >>= zTextDisplayFilter global where
-    thread global@(config, rs, wrs, ch) localChan = do
-      netState <- readNetFile "/proc/net/dev"
-      newNetState <- oneUpdate 0.3 netState
-      loop (oneUpdate $ refreshRate config) newNetState where
-
-        ms sec = truncate $ 1000000 * sec
-        perSec sec val = truncate $ (fi val) / sec
-
-        makeMessage input sec = message where
-          atIndex idx = bytes . perSec sec $ input !! idx
-          inbound = atIndex 0
-          outbound = atIndex 8
-          message = printf "In: %s/s : Out: %s/s" inbound outbound
-
-        oneUpdate sec netState = do
-          newNetState <- readNetFile "/proc/net/dev"
-          let netDelta = delta (newNetState ! dev) (netState ! dev)
-          writeChan ch ((getRealWindow wrs), (widgetId config))
-          writeChan localChan $ makeMessage netDelta sec
-          threadDelay $ ms sec
-          return newNetState
+getDt newTs ts = (/1e12) . fromIntegral . fromEnum $ diffUTCTime newTs ts
 
 zClockWidget global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thr, "") global z >>= zTextDisplayFilter global where
@@ -719,22 +718,54 @@ zClockWidget global@(config, rs, wrs, ch) z =
       let localtime = utcToLocalTime timezone time
       return $ formatTime defaultTimeLocale (timeFormat config) localtime
 
+loadavg = readFile "/proc/loadavg" >>= return . ("Load avg: "++)
+                                       . join " " . take 3 . words
+
 zTopWidget global@(config, rs, wrs, ch) z = do
+  startVal <- loadavg
+  zAddThreadFilter (thread, [startVal]) global z >>= zMultilineTextDisplayFilter global where
+    thread = zThreadWithIntervals [0.6] pickCpuUsage makeOutput
+    makeOutput dt cpuMap = do
+      newCpuMap <- pickCpuUsage
+      avg <- loadavg
+      diff <- makeCpuDiff newCpuMap cpuMap dt
+      return (avg:diff, newCpuMap)
+
+zNetInfoWidget dev global@(config, rs, wrs, ch) z = 
   zAddThreadFilter (thread, ["..."]) global z >>= zMultilineTextDisplayFilter global where
-    thread global@(config, rs, wrs, ch) localChan = do
-      newCpuMap <- oneUpdate 0.3 M.empty
-      loop (oneUpdate $ refreshRate config) newCpuMap where
-        ms sec = truncate $ 1000000 * sec
-        loadavg = readFile "/proc/loadavg" >>= return . ("Load avg: "++)
-                                               . join " " . take 3 . words
-        oneUpdate sec cpuMap = do
-          newCpuMap <- makeCpuMap
-          avg <- loadavg
-          diff <- makeCpuDiff newCpuMap cpuMap sec
-          writeChan ch ((getRealWindow wrs), (widgetId config))
-          writeChan localChan (avg:diff)
-          threadDelay $ ms sec
-          return newCpuMap
+    thread = zThreadWithIntervals [1.0] getInitialState makeOutput
+    getInitialState = getNetState >>= \x -> return $! (x, [0, 0], 0.0)
+    getNetState = readNetFile "/proc/net/dev" >>= \x -> return $! x
+
+    makeOutput dt (netState, total, totalDt) = do
+      newNetState <- getNetState
+      let netDelta = delta (newNetState ! dev) (netState ! dev)
+          curr@[inbound, outbound] = map (bytes . (perSec dt)) . getNetBytes $ netDelta
+          total' = map (pair $ (+)) $ zip total $ getNetBytes netDelta
+          totalDt' = totalDt + dt
+          [avgIn, avgOut] = map (bytes . perSec totalDt') total'
+          message = printf "In: %s/s : Out: %s/s" inbound outbound
+          totalMessage = printf "Avg In: %s/s : Out: %s/s" avgIn avgOut
+      return ([message, totalMessage], (newNetState, total', totalDt'))
+
+zMemInfoWidget global@(config, rs, wrs, ch) z = 
+  zAddThreadFilter (thread, ["..."]) global z >>= zMultilineTextDisplayFilter global where
+    thread = zStatelessThread $ do
+      x' <- readKeyValueFile ((`div` 1024) . read . head . words) "/proc/meminfo" :: IO (M.Map String Int)
+      let x = M.insert "Swap" ((x M.! "SwapTotal") - (x M.! "SwapFree")) x'
+      let values = ["MemFree", "Cached", "Buffers", "Swap"]
+      let mem = map (\n -> printf "%7s: %4d MB" n (x M.! n)) values
+      perPidInfo <- memInfo
+      return perPidInfo
+      return $ map (pair $ (++)) $ zip mem perPidInfo
+
+zTrayerPlaceholder global@(config, rs, wrs, ch) z = do
+  handle <- runCommand . trayerCmd $ barWidth - (widgetX config) - (widgetWidth config)
+  widget handle where
+    widget handle = return $ z { zOnDestroy = destroy' } where
+      destroy' s = do
+        (zOnDestroy z) s
+        terminateProcess handle
 
 testStrings = [
   "Load avg: 0.01 0.05 0.05",
@@ -751,6 +782,8 @@ makeZNetWidget dev s = zEmptyWidget s >>= zAddFrame s >>= zNetWidget dev s >>= z
 makeZCpuTop s = zEmptyWidget s >>= zAddFrame s >>= zTopWidget s >>= zWrap s
 makeZBatteryRate s = zEmptyWidget s >>= zAddFrame s >>= zBatteryRateWidget s >>= zWrap s
 makeZNetInfo dev s = zEmptyWidget s >>= zAddFrame s >>= zNetInfoWidget dev s >>= zWrap s
+makeZMemInfo s = zEmptyWidget s >>= zAddFrame s >>= zMemInfoWidget s >>= zWrap s
+makeZTrayer s = zEmptyWidget s >>= zTrayerPlaceholder s >>= zWrap s
 
 zWrap settings@(config, rs, wrs, ch) z@(ZWidget initialState update draw destroy) = return $ wrap initialState where
    wrap state = Widget {
