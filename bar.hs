@@ -330,15 +330,16 @@ updateTooltip dpy gState ww pos = do
         otherwise -> return Done
 
 eventLoop dpy gState = do
-  allocaXEvent $ \ev -> do
+  res <- allocaXEvent $ \ev -> do
     nextEvent dpy ev
     event <- getEvent ev
     -- print $ show $ event
-    res <- handleMessage gState event
-    case res of
-      ExitEventLoop -> return gState
-      Done -> eventLoop dpy gState
-      Update gState' -> eventLoop dpy gState'
+    handleMessage gState event
+
+  case res of
+    ExitEventLoop -> return gState
+    Done -> eventLoop dpy gState
+    Update gState' -> eventLoop dpy gState'
 
 sendClientEvent d a w val = do
     allocaXEvent $ \e -> do
