@@ -44,7 +44,7 @@ backgroundColorString = "#BEBEBE"
 foregroundColorString = "#000000"
 frameBackground = "#181838"
 graphBackgroundColor = 0x181838
-memColorTable = [0x007F00, 0xFF0000, 0x0000FF]
+memColorTable = [0x00FF00, 0x0000FF]
 netColorTable = [0x0000FF, graphBackgroundColor, 0x00FF00]
 marginTop = 1 :: Int
 marginBottom = 1 :: Int
@@ -365,6 +365,7 @@ main = do
   w <- createWindow dpy (defaultRootWindow dpy) (fi barX) (fi barY)
                         (fi barWidth) (fi barHeight)
                     0 copyFromParent inputOutput visual 0 nullPtr
+  lowerWindow dpy w
   let strutValues = [0, 0, fi barHeight :: CLong, 0,
                      0, 0, 0, 0,
                      0, 1360, 0, 0]
@@ -541,14 +542,14 @@ makeCpuSample (_ :user:nice:sys:idle:io:tail) = map (makeLine total) values wher
 
 zMemWidget global@(config, rs, wrs, ch) z = 
   zAddThreadFilter (thr, val) global z >>= zGraphDisplayFilter global where
-    val = replicate 3 0
+    val = replicate 2 0
     thr = zStatelessThread $ do
       memState <- readBatteryFile "/proc/meminfo"
       return $ makeMemSample memState
 
 makeMemSample input = map (makeLine total) values where
-  total:free:cached:active:[] = map (read . (input !)) ["MemTotal", "MemFree", "Cached", "Active"]
-  values = [total - free, total - free - cached, active]
+  total:free:cached:[] = map (read . (input !)) ["MemTotal", "MemFree", "Cached"]
+  values = [total - free, total - free - cached]
 
 getNetBytes input = [inbound, outbound] where
   atIndex idx = fi $ input !! idx
