@@ -99,9 +99,9 @@ mem = defaultWidget { makeWidget = makeZMemWidget, colorTable = memColorTable,
                       widgetTooltip = Just memTooltip, refreshRate = 120, onClick = Just "top.sh" }
 clock = defaultWidget { makeWidget = makeZClockWidget, widgetTooltip = Just clockTooltip, onClick = Just "clock.sh" }
 battery = defaultWidget { makeWidget = makeZBatteryWidget, widgetWidth = 100, refreshRate = 3,
-			   widgetTooltip = Just batteryTooltip }
+                          widgetTooltip = Just batteryTooltip }
 
-net dev = defaultWidget { makeWidget = makeZNetWidget "wlan0", 
+net dev = defaultWidget { makeWidget = makeZNetWidget dev,
                           colorTable = netColorTable,
                           widgetTooltip = Just $ netTooltip dev }
 title = defaultWidget { makeWidget = makeZTitleWidget, refreshRate = 0, drawFrame = False }
@@ -145,7 +145,7 @@ data WidgetConfig = WidgetConfig {
   widgetPadding :: Int,
   widgetTooltip :: Maybe WidgetConfig,
   fontName :: String,
-  frameBackgroundColor :: String, 
+  frameBackgroundColor :: String,
   textColor :: String,
   colorTable :: [Pixel],
   timeFormat :: String,
@@ -204,14 +204,14 @@ handleMessage gState (ClientMessageEvent {ev_window = w, ev_data = widgetId:_}) 
        Just widget -> do
          -- print $ "Widget found!"
          widget <- doUpdate widget
-   
-         onDraw widget 
+
+         onDraw widget
          let wConf = widgetConfig widget
          updateWindowRegion (fi $ widgetX wConf) (fi $ widgetWidth wConf) widget
          let windowWidgetMap' = M.insert widgetId widget windowWidgetMap
          let widgetsMap' = M.insert w windowWidgetMap' widgetsMap
          return . Update $ gState { widgetsById = widgetsMap' }
-  
+
 handleMessage gState (ButtonEvent {ev_x = pos, ev_window = ww}) = do
   let widgetsMap = widgetsById gState
   case M.lookup ww widgetsMap of
@@ -244,7 +244,7 @@ handleMessage gState (MotionEvent {ev_x = pos, ev_window = ww, ev_event_display 
 
 handleMessage gState (CrossingEvent {ev_event_type = 7, ev_window = ww, ev_x = pos, ev_event_display = dpy}) = do -- EnterNotify
   updateTooltip dpy gState ww pos
- 
+
 handleMessage gState (CrossingEvent {ev_event_type = 8, ev_window = ww, ev_event_display = dpy}) = do -- LeaveNotify
   print "Leave! Destroying Window"
   destroyTooltip dpy gState >>= return . Update
@@ -389,7 +389,7 @@ main = do
   setBackground dpy gc (whitePixel dpy scr) -- FIXME: figure out if this is needed
   setLineAttributes dpy gc 1 lineSolid capRound joinRound
 
-  selectInput dpy w (structureNotifyMask .|. buttonPressMask 
+  selectInput dpy w (structureNotifyMask .|. buttonPressMask
                  .|. enterWindowMask .|. leaveWindowMask .|. pointerMotionMask
                  .|. exposureMask)
   mapWindow dpy w
@@ -406,7 +406,7 @@ main = do
 
   let gState = GlobalState (M.insert w (M.fromList widgets) M.empty) w Nothing chan
   gState <- eventLoop dpy gState
-  
+
   killThread eventCopyThread
   mapM onDestroy . concat . map M.elems . M.elems . widgetsById $ gState
   destroyWindow dpy w
@@ -443,7 +443,7 @@ data ZWidget s = ZWidget {
     zOnDestroy :: s -> IO ()
 }
 
-toColor str = fst . head . readHex . tail $ str 
+toColor str = fst . head . readHex . tail $ str
 
 zEmptyWidget (config, rs, wrs, ch) = return $ ZWidget { zOnDraw = \x -> return (), zDoUpdate = return, zOnDestroy = \x -> return (), zState = () }
 
@@ -464,7 +464,7 @@ zThreadWithIntervals firstIntervals makeState run global@(config, rs, wrs, ch) l
   time <- getCurrentTime
   state <- makeState >>= \x -> return $! x
   let intervals = firstIntervals ++ (repeat $ refreshRate config)
-  
+
   loop intervals time state where
     loop (interval:intervals) time state = do
       threadDelay (truncate $ 1000000 * interval)
@@ -489,7 +489,7 @@ zAddThreadFilter (thr, val) global@(config, rs, wrs, ch) z@(ZWidget init update 
   widget clientChan threadId where
     widget clientChan threadId = return $ ZWidget init' update' draw' destroy' where
       init' = (init, val)
-     
+
       update' (s, val) = do
         s <- update s
         -- print $ "Pickup a value: " ++ (show s)
@@ -497,7 +497,7 @@ zAddThreadFilter (thr, val) global@(config, rs, wrs, ch) z@(ZWidget init update 
         return (s, newval)
 
       draw' (s, val) = draw s
-     
+
       destroy' (s, val) = do
         destroy s
         killThread threadId
@@ -521,14 +521,14 @@ zGraphDisplayFilter global@(config, rs,wrs, ch) (ZWidget init@(s,sample) update 
     let segments = map (\a -> map makeSegment $ dropZeros $ zip [pos..] a) graph -- FIXME: segments using x position
     mapM (drawColorSegment rs) $ zip segments (colorTable config)
     return ()
-     
+
   update' (s, graph) = do
     s@(_, newSample) <- update s
     return (s, updateGraph graph newSample)
 
   destroy' (s, val) = destroy s
 
-zCpuWidget global@(config, rs, wrs, ch) z = 
+zCpuWidget global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thr, val) global z >>= zGraphDisplayFilter global where
     val = replicate 4 0
     thr = zThread getCpuData $ \procData -> do
@@ -540,7 +540,7 @@ makeCpuSample :: [Int] -> [Dimension]
 makeCpuSample (_ :user:nice:sys:idle:io:tail) = map (makeLine total) values where
   (total:values) = reverse $ accumulate 0 [sys + io, nice, user, idle]
 
-zMemWidget global@(config, rs, wrs, ch) z = 
+zMemWidget global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thr, val) global z >>= zGraphDisplayFilter global where
     val = replicate 2 0
     thr = zStatelessThread $ do
@@ -556,7 +556,7 @@ getNetBytes input = [inbound, outbound] where
   inbound = atIndex 0
   outbound = atIndex 8
 
-zNetWidget dev global@(config, rs, wrs, ch) z = 
+zNetWidget dev global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thr, val) global z >>= zGraphDisplayFilter global where
     val = replicate 3 0
     thr = zThread (readNetFile "/proc/net/dev") $ \netState -> do
@@ -604,7 +604,7 @@ zMultilineTextDisplayFilter global@(config, rs,wrs, ch) z = do
       draw' val@(s, strings) = do
         (zOnDraw z) val
         height <- xftTextExtents (getDisplay rs) font "Az^.#" >>= return . xglyphinfo_height
-        
+
         --print msg
         withDraw rs $ \d -> withColor (textColor config) rs $ drawStrings strings height d
       drawStrings strings height d c = drawOne 0 strings where
@@ -733,7 +733,7 @@ zTopWidget global@(config, rs, wrs, ch) z = do
       diff <- makeCpuDiff newCpuMap cpuMap dt
       return (avg:diff, newCpuMap)
 
-zNetInfoWidget dev global@(config, rs, wrs, ch) z = 
+zNetInfoWidget dev global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thread, ["..."]) global z >>= zMultilineTextDisplayFilter global where
     thread = zThreadWithIntervals [1.0] getInitialState makeOutput
     getInitialState = getNetState >>= \x -> return $! (x, [0, 0], 0.0)
@@ -750,7 +750,7 @@ zNetInfoWidget dev global@(config, rs, wrs, ch) z =
           totalMessage = printf "Avg In: %s/s : Out: %s/s" avgIn avgOut
       return ([message, totalMessage], (newNetState, total', totalDt'))
 
-zMemInfoWidget global@(config, rs, wrs, ch) z = 
+zMemInfoWidget global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thread, ["..."]) global z >>= zMultilineTextDisplayFilter global where
     thread = zStatelessThread $ do
       x' <- readKeyValueFile ((`div` 1024) . read . head . words) "/proc/meminfo" :: IO (M.Map String Int)
