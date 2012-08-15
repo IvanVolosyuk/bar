@@ -556,14 +556,18 @@ getNetBytes input = [inbound, outbound] where
   inbound = atIndex 0
   outbound = atIndex 8
 
+netDelta new old dev = case (M.lookup dev new , M.lookup dev old) of
+  (Just n, Just o) -> delta n o
+  otherwise -> repeat 0
+
 zNetWidget dev global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thr, val) global z >>= zGraphDisplayFilter global where
     val = replicate 3 0
     thr = zThread (readNetFile "/proc/net/dev") $ \netState -> do
       newNetState <- readNetFile "/proc/net/dev"
-      let netDelta = delta (newNetState ! dev) (netState ! dev)
-      -- print $ show $ makeNetSample netDelta
-      return ((makeNetSample netDelta), newNetState)
+      let delta = netDelta newNetState netState dev
+      -- print $ show $ makeNetSample delta
+      return ((makeNetSample delta), newNetState)
     f x = log (x + 1)
     f2 x = (f x) * (f x)
     maxF = (*2) . f2 $ 10000000 * refreshRate config -- max rate 10 Mb/s
@@ -741,9 +745,9 @@ zNetInfoWidget dev global@(config, rs, wrs, ch) z =
 
     makeOutput dt (netState, total, totalDt) = do
       newNetState <- getNetState
-      let netDelta = delta (newNetState ! dev) (netState ! dev)
-          curr@[inbound, outbound] = map (bytes . (perSec dt)) . getNetBytes $ netDelta
-          total' = map (pair $ (+)) $ zip total $ getNetBytes netDelta
+      let delta = netDelta newNetState netState dev
+          curr@[inbound, outbound] = map (bytes . (perSec dt)) . getNetBytes $ delta
+          total' = map (pair $ (+)) $ zip total $ getNetBytes delta
           totalDt' = totalDt + dt
           [avgIn, avgOut] = map (bytes . perSec totalDt') total'
           message = printf "In: %s/s : Out: %s/s" inbound outbound
