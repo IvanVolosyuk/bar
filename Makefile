@@ -1,4 +1,11 @@
-all: dzen
+all: dzen bar
 
-dzen: dzen.hs Xpm.hs
+clean:
+	rm *.o *.hi bar dzen
+
+dzen: dzen.hs Xpm.hs Utils.hs
 	ghc --make dzen
+
+bar: bar.hs Top.hs Utils.hs Icon.hs DzenParse.hs
+	ghc --make -threaded bar -O2 -funfolding-use-threshold=16 -optc-O3 -fexcess-precision 
+

@@ -20,15 +20,18 @@ import System.Directory (doesFileExist)
 import Xpm
 import Data.HashTable (hashString)
 
+import Utils
+
 height = 22
 padding = 4
+maxUpdatesPerSecond = 60
 backgroundColor = "#BEBEBE"
 graphBackgroundColor = "#181838"
 cpuColorTable = ["#007F00", "#7F0000", "#600060", "#0000FF"]
 batteryColorTable = ["#303060"]
 memColorTable = ["#007F00", "#FF0000", "#0000FF"]
 netColorTable = ["#0000FF", graphBackgroundColor, "#00FF00"]
-netSilenceThreshold = 100
+netSilenceThreshold = 10000
 trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
              \ --widthtype request --height %d --margin %d" height rightMargin
 
@@ -44,7 +47,7 @@ trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
 iconConfig = defaultIconConfig {
    pickSize = 16,
    postProcessing = shadow 2 "#00000050" . shift 0 (-1) . scaleLinear 25 . shadow 2 "#000000FF" . scaleLinear 64,
-   cacheIcon = False,
+   cacheIcon = True,
    bgColor = backgroundColor
    }
 
@@ -54,7 +57,7 @@ layout= [ (emptySpace,      never,  L 10),
        --   (net "eth1",         5,  R 20),
           (net "eth0",          5,  R 20),
        --   (batteryGraph,      300,  R 40),
-       --   (battery,             5,  R 120),
+          (battery,             5,  R 120),
           (mem,                60,  R 15),
           (cpu,                 2,  R 60),
           (clock,               2,  R 60)
@@ -83,21 +86,6 @@ bar :: Int -> String
   dzenColor = printf "^fg(%s)%s^fg()"
   dzenBar h = printf "^pa(;%d)^r(1x%d)" (height-h + 1) (h::Int)
 
-split :: Char -> String -> [String]
-split ch s =  case dropWhile (==ch) s of
-  "" -> []
-  s' -> word : split ch s''
-    where (word, s'') = break (==ch) s'
-
-strip :: String -> String
-strip s = reverse . dropWhile p . reverse . dropWhile p $ s where
-  p = (==' ')
-
-split1 ch s = (x, safeTail xs) where
-  safeTail [] = []
-  safeTail (x:xs) = xs
-  (x,xs) = break (==ch) s
-
 updateGraph samples sample = newSamples where
   newSamples = map (\(n,o) -> o++[n]) $ zip sample $ map (drop 1) samples
 
@@ -108,17 +96,12 @@ makeLine total = bar . (`div` safe total) . (* height)
 
 getCpuData = readFile "/proc/stat" >>= return . map(read) . words . head . lines
 
-readKeyValueFile pp filename = readFile filename >>= return . makeMap where
-  makeMap l = fromList $ map parseLine . lines $ l
-  parseLine l = (strip k, pp . words $ v) where
-     (k,v) = split1 ':' l
-
-readBatteryFile = readKeyValueFile head
-readNetFile = readKeyValueFile $ map read
+readBatteryFile = readKeyValueFile $ head . words
+readNetFile = readKeyValueFile $ map read . words
 
 newtype IOBox = IOBox { exec :: IO (String, IOBox) }
-data Geometry = L Int | R Int
 type BoxIO = IO (String, IOBox)
+data Geometry = L Int | R Int
 type BoxState = StateT BoxIO IO
 type Graph = [[String]]
 
@@ -149,7 +132,7 @@ clock width = do
   return (frame' ++ clockDisplay, IOBox { exec = clock width })
 
 mem width = do
-  let zeroGraph = take 4 $ repeat $ take width $ repeat $ bar 0
+  let zeroGraph = replicate 4 $ replicate width $ bar 0
   mem' width zeroGraph where
     mem' width graph = do
       memState <- liftIO $ readBatteryFile "/proc/meminfo"
@@ -161,7 +144,7 @@ makeMemSample input = map (makeLine total) values where
   values = [total - free, total - free - cached, active]
 
 net dev width = do
-  let zeroGraph = take 3 $ repeat $ take width $ repeat $ bar 0
+  let zeroGraph = replicate 3 $ replicate width $ bar 0
   netState <- liftIO $ readNetFile "/proc/net/dev"
   net' dev width zeroGraph netState where
     net' dev width graph netState = do
@@ -180,7 +163,7 @@ makeNetSample dev input = map (makeLine total) values where
 delta newar ar = map (\(n,o) -> n-o) $ zip newar ar
 
 cpu width = do
-  let zeroGraph = take 3 $ repeat $ take width $ repeat $ bar 0
+  let zeroGraph = replicate 3 $ replicate width $ bar 0
   procData <- getCpuData
   cpu' width zeroGraph procData where
     cpu' width graph procData = do
@@ -196,7 +179,7 @@ makeCpuSample (_ :user:nice:sys:idle:io:tail) = map (makeLine total) values wher
 
 batteryGraph width = do
   batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
-  let zeroGraph = (take width $ repeat $ bar 0) : []
+  let zeroGraph = (replicate width $ bar 0) : []
   batGr' width zeroGraph $ read $ batteryInfo ! "design capacity" where
     batGr' width graph capacity = do
         batteryState <- liftIO $ readBatteryFile "/proc/acpi/battery/BAT0/state"
@@ -281,8 +264,10 @@ mergeTitle chan = forever $ do
   title <- get
   (n, val) <- liftIO $ readChan chan
   let newTitle = l ++ (val : r) where (l, _:r) = splitAt n title
-  liftIO $ putStrLn $ concat newTitle
-  liftIO $ hFlush stdout
+  isEmpty <- liftIO $ isEmptyChan chan
+  when isEmpty $ do
+    liftIO $ putStrLn $ concat newTitle
+    liftIO $ hFlush stdout
   put newTitle
 
 spawnTrayer xpos = do
@@ -297,6 +282,6 @@ main = do
   screenWidth <- getScreenWidth
   (_, offsetR) <- initLayoutAll chan 0 (screenWidth + padding `div` 2) $ zip (enumFrom 0) layout
   forkProcess $ spawnTrayer $ screenWidth - offsetR + padding `div` 2
-  let emptyTitle = take (length layout) . repeat $ ""
+  let emptyTitle = replicate (length layout) $ ""
   evalStateT (mergeTitle chan) emptyTitle
 

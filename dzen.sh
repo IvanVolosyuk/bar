@@ -2,4 +2,5 @@
 
 cd ~/.xmonad/ivan
 export PATH=$(dirname $0):$PATH
-dzen | dzen2 -bg "#BEBEBE" -fg black -h 24 -ta l
+bar
+#dzen | dzen2 -bg "#BEBEBE" -fg black -h 24 -ta l
