@@ -51,10 +51,10 @@ iconConfig = defaultIconConfig {
 --          Object    refresh (sec)  position
 layout= [ (emptySpace,      never,  L 10),
           (genTitle,            0,  L 0),
-          (net "eth1",         5,  R 20),
+       --   (net "eth1",         5,  R 20),
           (net "eth0",          5,  R 20),
        --   (batteryGraph,      300,  R 40),
-          (battery,             5,  R 120),
+       --   (battery,             5,  R 120),
           (mem,                60,  R 15),
           (cpu,                 2,  R 60),
           (clock,               2,  R 60)

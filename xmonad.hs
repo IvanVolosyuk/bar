@@ -68,7 +68,7 @@ myBorderWidth   = 1
 -- ("right alt"), which does not conflict with emacs keybindings. The
 -- "windows key" is usually mod4Mask.
 --
-myModMask       = mod4Mask
+myModMask       = mod1Mask
 
 -- The default number of workspaces (virtual screens) and their names.
 -- By default we use numeric strings, but any string may be used as a
@@ -190,17 +190,17 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm .|. shiftMask,   xK_Right), sendMessage $ Swap L)
     , ((modm .|. shiftMask,   xK_Up   ), sendMessage $ Swap U)
     , ((modm .|. shiftMask,   xK_Down ), sendMessage $ Swap D)
-    , ((mod1Mask, xK_F2), spawn "gmrun")
-    , ((mod1Mask, xK_F4), kill)
-    , ((mod4Mask, xK_F4), kill)
-    , ((mod4Mask, xK_Delete), kill)
-    , ((mod4Mask, xK_i), spawn "/usr/bin/fetchotp -x")
+    , ((modm, xK_F2), spawn "gmrun")
+    , ((modm, xK_F4), kill)
+    , ((modm, xK_F4), kill)
+    , ((modm, xK_Delete), kill)
+    --, ((mod4Mask, xK_i), spawn "/usr/bin/fetchotp -x")
 
     , ((controlMask .|. mod1Mask, xK_l), spawn "gnome-screensaver-command -l")
     , ((modm,                     xK_F1), spawn "gnome-screensaver-command -l")
 
-    , ((controlMask, xK_F11             ), spawn "/home/vol/opt/bin/volume down")
-    , ((controlMask, xK_F12             ), spawn "/home/vol/opt/bin/volume up")
+    , ((controlMask, xK_F11             ), spawn "/home/ivan/opt/bin/volume down")
+    , ((controlMask, xK_F12             ), spawn "/home/ivan/opt/bin/volume up")
     , ((modm,               xK_a), sendMessage MirrorShrink)
     , ((modm,               xK_z), sendMessage MirrorExpand)
     ]
@@ -338,7 +338,7 @@ myStartupHook = return ()
 -- Run xmonad with the settings you specify. No need to modify this.
 --
 main = do
-  xmproc <- spawnPipe "/home/vol/.xmonad/ivan/dzen.sh"
+  xmproc <- spawnPipe "/home/ivan/.xmonad/ivan/dzen.sh"
   xmonad (defaults xmproc)
 
 -- A structure containing your configuration settings, overriding
