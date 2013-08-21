@@ -59,8 +59,9 @@ loadWidgets = [
    clock { timeFormat = "%R" },
    cpu,
    mem { refreshRate = 120 },
-   -- battery,
+   battery,
    (net "eth0") { widgetWidth = 40, refreshRate = 1 },
+   trayer,
    title { widgetX = 10 }
    ]
 
@@ -694,26 +695,30 @@ drawDzenXft font iconCache input rs wConf = do
       draw fg bg (pos + xglyphinfo_xOff glyphInfo) xs d
 
 
+readBatteryString x = readFile ("/sys/class/power_supply/BAT0/" ++ x) >>= return . head . lines
+readBatteryInt x = readBatteryString x >>= return . read :: IO Int
 
 zBatteryWidget global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thr, "") global z >>= zTextDisplayFilter global where
     thr = zStatelessThread $ do
-      batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
-      batteryState <- readBatteryFile "/proc/acpi/battery/BAT0/state"
-      let capacity = read $ batteryInfo ! "design capacity"
-          rate = read $ batteryState ! "present rate" :: Int
-          remainingCapacity = read $ batteryState ! "remaining capacity"
-          (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
+--      batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
+--      batteryState <- readBatteryFile "/proc/acpi/battery/BAT0/state"
+      capacity <- readBatteryInt "charge_full"
+      rate <- readBatteryInt "current_now"
+      remainingCapacity <- readBatteryInt "charge_now"
+      state <- readBatteryString "status" :: IO String
+      let (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
           percent = remainingCapacity * 100 `div` capacity
-      return $ case batteryState ! "charging state" of
-        "discharging" | rate /= 0 -> printf "%d%%(%d:%02d)" percent h m
+      return $ case state of
+        "Discharging" | rate /= 0 -> printf "%d%%(%d:%02d)" percent h m
         otherwise -> printf "%d%%C" percent
 
 zBatteryRateWidget global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thr, "") global z >>= zTextDisplayFilter global where
     thr = zStatelessThread $ do
-      batteryState <- readKeyValueFile strip "/proc/acpi/battery/BAT0/state"
-      return . printf " Present Rate: %s" $ batteryState ! "present rate"
+      rate <- readBatteryString "current_now"
+      let rateDouble = (read rate) / 1000000 :: Double
+      return . printf " Present Rate: %.3f mA" $ rateDouble
 
 getDt newTs ts = (/1e12) . fromIntegral . fromEnum $ diffUTCTime newTs ts
 
