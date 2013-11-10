@@ -45,8 +45,9 @@ import Utils
 -}
 
 valuePicker selector file = (pid, (name, usage)) where
-  w@(pid:name:_) = words file
-  usage = selector w
+  w@(pid:rest) = words file
+  usage = selector (drop (length(w) - 52) w)
+  name = unwords $ take (length(w) - 51) rest
 
 makeCpuDiff newCpuInfo cpuInfo sec = do
   let diff = M.elems $ M.differenceWith (\(n,a) (_,b) -> Just $ (n,a - b)) newCpuInfo cpuInfo
