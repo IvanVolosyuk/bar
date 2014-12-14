@@ -15,6 +15,7 @@ import Foreign.Ptr
 import Text.Printf
 import GHC.Word
 import Numeric
+import System.IO.Error
 
 import qualified Data.Map as M
 
@@ -91,7 +92,7 @@ loadIconImage c@(IconCache dpy atom cache cfg) win = do
         return c
      Nothing -> do
        print "Start fetching icon data"
-       iconRawData <- fetchIconData c win `catch` \x -> return $ Just defaultIcon
+       iconRawData <- fetchIconData c win `catchIOError` \x -> return $ Just defaultIcon
        print "Stop fetching icon data"
        let iconRawData' = getIconDataDefault iconRawData
            icons = makeIconList $ iconRawData'

@@ -4,10 +4,10 @@ module DzenParse (
   parseLine
   ) where
 
-import Text.Parsec
-import Text.Parsec.String
-import Text.Parsec.Expr
-import Text.Parsec.Token
+import Text.ParserCombinators.Parsec
+--import Text.ParserCombinators.Parsec.String
+--import Text.ParserCombinators.Parsec.Expr
+--import Text.ParserCombinators.Parsec.Token
 import qualified Data.Map as M
 
 dzenMsg = "^fg(white)^bg(#2b4f98) 1 ^fg()^bg()^fg(black)^bg(#cccccc) 2 ^fg()^bg()^fg(black)^bg(#cccccc) 3 ^fg()^bg()^fg(black)^bg(#cccccc) 9 ^fg()^bg()  ^fg(#202020){56623107}dzen.sh (~/.xmonad/ivan) - GVIM^fg()"

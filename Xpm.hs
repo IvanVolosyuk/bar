@@ -29,7 +29,7 @@ module Xpm (
   pair
   ) where
 
-import IO
+import System.IO
 import Text.Printf
 
 import qualified Data.Map as M

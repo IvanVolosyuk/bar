@@ -11,7 +11,6 @@ import Control.Concurrent
 import Control.Concurrent.Chan
 import System.IO
 import System.Posix.IO
-import IO
 import System.Posix.Signals
 import Graphics.X11.Xlib
 import System.Posix.Process
@@ -19,6 +18,7 @@ import System.Process
 import System.Directory (doesFileExist)
 import Xpm
 import Data.HashTable (hashString)
+import System.IO.Error
 
 import Utils
 
@@ -219,7 +219,7 @@ genTitle w = do
   st0 <- initState iconConfig
   genTitle' st0 w where
     genTitle' state w = do
-      s1 <- getLine `catch` exit
+      s1 <- getLine `catchIOError` exit
       ready <- hReady stdin
       if ready
         then genTitle' state w

@@ -94,12 +94,6 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     -- launch a terminal
     [ ((modm .|. shiftMask, xK_Return), spawn $ XMonad.terminal conf)
 
-    -- launch dmenu
-    , ((modm,               xK_p     ), spawn "gmrun")
-
-    -- launch gmrun
-    , ((modm .|. shiftMask, xK_p     ), spawn "gmrun")
-
     -- close focused window
     , ((modm .|. shiftMask, xK_c     ), kill)
 
@@ -134,7 +128,7 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm .|. shiftMask, xK_k     ), windows W.swapUp    )
 
     -- Shrink the master area
-    , ((modm,               xK_h     ), sendMessage Expand)
+    --, ((modm,               xK_h     ), sendMessage Expand)
     , ((modm,               xK_minus ), sendMessage Expand)
 
     -- Expand the master area
@@ -142,7 +136,7 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm,               xK_equal  ), sendMessage Shrink)
 
     -- Push window back into tiling
-    , ((modm,               xK_t     ), withFocused $ windows . W.sink)
+    -- , ((modm,               xK_t     ), withFocused $ windows . W.sink)
 
     -- Increment the number of windows in the master area
     , ((modm              , xK_comma ), sendMessage (IncMasterN (-1)))
@@ -157,7 +151,7 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm              , xK_b     ), sendMessage ToggleStruts)
 
     -- Quit xmonad
-    , ((modm .|. shiftMask, xK_q     ), io (exitWith ExitSuccess))
+    , ((modm .|. shiftMask .|. controlMask, xK_q     ), io (exitWith ExitSuccess))
 
     -- Restart xmonad
     , ((modm              , xK_q     ), spawn "xmonad --recompile; xmonad --restart")
@@ -178,7 +172,7 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     -- mod-shift-{w,e,r}, Move client to screen 1, 2, or 3
     --
     [((m .|. modm, key), screenWorkspace sc >>= flip whenJust (windows . f))
-        | (key, sc) <- zip [xK_w, xK_e, xK_r] [0..]
+        | (key, sc) <- zip [xK_u, xK_i, xK_o] [0..]
         , (f, m) <- [(W.view, 0), (W.shift, shiftMask)]]
     ++
     [
@@ -196,8 +190,8 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm, xK_Delete), kill)
     --, ((mod4Mask, xK_i), spawn "/usr/bin/fetchotp -x")
 
-    , ((controlMask .|. mod1Mask, xK_l), spawn "gnome-screensaver-command -l")
-    , ((modm,                     xK_F1), spawn "gnome-screensaver-command -l")
+    , ((controlMask .|. mod1Mask, xK_l), spawn "dm-tool lock")
+    , ((modm,                     xK_F1), spawn "dm-tool lock")
 
     , ((controlMask, xK_F11             ), spawn "/home/ivan/opt/bin/volume down")
     , ((controlMask, xK_F12             ), spawn "/home/ivan/opt/bin/volume up")

@@ -18,6 +18,7 @@ import System.Exit
 import Text.Printf (printf)
 import System.Locale
 import System.Process (runCommand, terminateProcess)
+import System.IO.Error
 
 import DzenParse
 import Icon
@@ -38,7 +39,7 @@ defaultPadding = 4 :: Int
 barX = 0 :: Int
 barY = 0
 barHeight = 24 :: Int
-barWidth = 1366 :: Int
+barWidth = 1920 :: Int
 backgroundColor = 0xBEBEBE
 backgroundColorString = "#BEBEBE"
 foregroundColorString = "#000000"
@@ -62,8 +63,8 @@ loadWidgets = [
    clock,
    cpu,
    mem,
-   battery,
-   (net "wlan0") { widgetWidth = 40, refreshRate = 1 },
+   -- battery,
+   -- (net "eth0") { widgetWidth = 40, refreshRate = 1 },
    trayer,
    title { widgetX = 10 }
    ]
@@ -101,7 +102,7 @@ clock = defaultWidget { makeWidget = makeZClockWidget, widgetTooltip = Just cloc
 battery = defaultWidget { makeWidget = makeZBatteryWidget, widgetWidth = 100, refreshRate = 3,
 			   widgetTooltip = Just batteryTooltip }
 
-net dev = defaultWidget { makeWidget = makeZNetWidget "wlan0", 
+net dev = defaultWidget { makeWidget = makeZNetWidget dev, 
                           colorTable = netColorTable,
                           widgetTooltip = Just $ netTooltip dev }
 title = defaultWidget { makeWidget = makeZTitleWidget, refreshRate = 0, drawFrame = False }
@@ -354,7 +355,7 @@ copyChanToX chan = do
   forever $ do
      (w,x) <- readChan chan
      -- print $ "Copy to X: " ++ (show x)
-     sendClientEvent d a w (fi x) `catch`  \x -> do
+     sendClientEvent d a w (fi x) `catchIOError`  \x -> do
        print $ "Exception caught: " ++ (show x)
        return ()
 
@@ -578,7 +579,7 @@ zTitleWidget global@(config, rs, wrs, ch) z =
     val = []
     (WindowRenderState win _) = wrs
     simpleThread = zStatelessThread (getLine >>= return . parseLine)
-    thr global@(_, _, _, ch) localChan = simpleThread global localChan `catch` exit where
+    thr global@(_, _, _, ch) localChan = simpleThread global localChan `catchIOError` exit where
       exit _ = do
         print "<End of input>"
         writeChan ch (win, (-1))

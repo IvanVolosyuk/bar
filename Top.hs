@@ -10,10 +10,12 @@ import System.Directory
 import Data.Char
 import Text.Printf
 import qualified Data.Map as M
+import System.IO.Error
 import Control.Concurrent
 import Data.Function
 import Data.List
 import Utils
+import System.IO.Error
 
 {-
 0 pid           process id
@@ -59,7 +61,7 @@ makeCpuDiff newCpuInfo cpuInfo sec = do
 
 readFiles [] = return []
 readFiles (pid:pids) = do
-  content <- (readFile pid >>= return . Just) `catch` \_ -> return Nothing
+  content <- (readFile pid >>= return . Just) `catchIOError` \_ -> return Nothing
   case content of
     Nothing -> readFiles pids
     Just c -> do
