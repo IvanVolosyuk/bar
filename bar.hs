@@ -696,7 +696,10 @@ drawDzenXft font iconCache input rs wConf = do
       draw fg bg (pos + xglyphinfo_xOff glyphInfo) xs d
 
 
-readBatteryString x = readFile ("/sys/class/power_supply/BAT0/" ++ x) >>= return . head . lines
+readFileWithFallback :: String -> IO [Char]
+readFileWithFallback x = (openFile x ReadMode >>= hGetLine) `catchIOError` \x -> return "0"
+
+readBatteryString x = readFileWithFallback ("/sys/class/power_supply/BAT1/" ++ x) >>= return . head . lines
 readBatteryInt x = readBatteryString x >>= return . read :: IO Int
 
 zBatteryWidget global@(config, rs, wrs, ch) z =
@@ -704,9 +707,9 @@ zBatteryWidget global@(config, rs, wrs, ch) z =
     thr = zStatelessThread $ do
 --      batteryInfo <- readBatteryFile "/proc/acpi/battery/BAT0/info"
 --      batteryState <- readBatteryFile "/proc/acpi/battery/BAT0/state"
-      capacity <- readBatteryInt "charge_full"
-      rate <- readBatteryInt "current_now"
-      remainingCapacity <- readBatteryInt "charge_now"
+      capacity <- readBatteryInt "energy_full"
+      rate <- readBatteryInt "power_now"
+      remainingCapacity <- readBatteryInt "energy_now"
       state <- readBatteryString "status" :: IO String
       let (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
           percent = remainingCapacity * 100 `div` capacity
@@ -717,7 +720,7 @@ zBatteryWidget global@(config, rs, wrs, ch) z =
 zBatteryRateWidget global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thr, "") global z >>= zTextDisplayFilter global where
     thr = zStatelessThread $ do
-      rate <- readBatteryString "current_now"
+      rate <- readBatteryString "power_now"
       let rateDouble = (read rate) / 1000000 :: Double
       return . printf " Present Rate: %.3f mA" $ rateDouble
 
