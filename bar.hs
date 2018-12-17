@@ -2,6 +2,7 @@
 -- Author: vol@google.com (Ivan Volosyuk)
 
 import Control.Concurrent
+import Control.Exception
 import Control.Concurrent.Chan
 import Control.Monad.State (StateT, execStateT, runStateT, forever, liftIO, put)
 import Data.Bits
@@ -18,6 +19,7 @@ import System.Exit
 import Text.Printf (printf)
 import System.Locale
 import System.Process (runCommand, terminateProcess)
+import System.IO
 import System.IO.Error
 
 import DzenParse
@@ -33,10 +35,11 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Map ((!))
 
-defaultPadding = 4 :: Int
+defaultPadding = 10 :: Int
 barX = 0 :: Int
 barY = 0
-barHeight = 24 :: Int
+barHeight = 48 :: Int
+textOffset = 36 :: Int
 backgroundColor = 0xBEBEBE
 backgroundColorString = "#BEBEBE"
 foregroundColorString = "#000000"
@@ -44,11 +47,11 @@ frameBackground = "#181838"
 graphBackgroundColor = 0x181838
 memColorTable = [0x00FF00, 0x0000FF]
 netColorTable = [0x0000FF, graphBackgroundColor, 0x00FF00]
-marginTop = 1 :: Int
-marginBottom = 1 :: Int
+marginTop = 2 :: Int
+marginBottom = 2 :: Int
 marginsVertical = marginTop + marginBottom :: Int
-defaultFontName = "-*-fixed-medium-r-normal--15-*-*-*-*-*-iso10646-*"
-fixedFontName = "-*-courier new-*-r-normal-*-17-*-*-*-*-*-*-*"
+defaultFontName = "-*-*-medium-r-normal--36-*-*-*-*-*-iso10646-*"
+fixedFontName = "-*-*-medium-r-normal-*-36-*-*-*-*-*-iso10646-*"
 defaultTimeFormat = "%R"
 textPadding = 2
 trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
@@ -61,14 +64,14 @@ loadWidgets = [
    cpu,
    mem { refreshRate = 120 },
    battery,
-   (net "eth0") { widgetWidth = 40, refreshRate = 1 },
+   (net "wlan0") { widgetWidth = 150, refreshRate = 1 },
    trayer,
    title { widgetX = 10 }
    ]
 
 defaultWidget = WidgetConfig {
     makeWidget = \s -> zEmptyWidget s >>= zWrap s,
-    widgetWidth = 60,
+    widgetWidth = 150,
     widgetId = 0,
     refreshRate = 1.0,
     widgetX = 0,
@@ -86,7 +89,7 @@ defaultWidget = WidgetConfig {
 
 defaultTooltip = defaultWidget {
    refreshRate = 3,
-   widgetWidth = 350,
+   widgetWidth = 1200,
    frameBackgroundColor = "#FFFFC0",
    widgetPadding = 0,
    textColor = "#000000",
@@ -96,7 +99,7 @@ cpu = defaultWidget { makeWidget = makeZCpuWidget, widgetTooltip = Just cpuTopTo
 mem = defaultWidget { makeWidget = makeZMemWidget, colorTable = memColorTable,
                       widgetTooltip = Just memTooltip, refreshRate = 120, onClick = Just "top.sh" }
 clock = defaultWidget { makeWidget = makeZClockWidget, widgetTooltip = Just clockTooltip, onClick = Just "clock.sh" }
-battery = defaultWidget { makeWidget = makeZBatteryWidget, widgetWidth = 100, refreshRate = 3,
+battery = defaultWidget { makeWidget = makeZBatteryWidget, widgetWidth = 260, refreshRate = 3,
                           widgetTooltip = Just batteryTooltip }
 
 net dev = defaultWidget { makeWidget = makeZNetWidget dev,
@@ -105,12 +108,12 @@ net dev = defaultWidget { makeWidget = makeZNetWidget dev,
 title = defaultWidget { makeWidget = makeZTitleWidget, refreshRate = 0, drawFrame = False }
 trayer = defaultWidget { makeWidget = makeZTrayer }
 
-clockTooltip = defaultTooltip { makeWidget = makeZClockWidget, refreshRate = 1, widgetWidth = 300,
+clockTooltip = defaultTooltip { makeWidget = makeZClockWidget, refreshRate = 1, widgetWidth = 900,
                                 timeFormat = "%a, %e %b %Y - %X"}
-memTooltip = defaultTooltip { makeWidget = makeZMemInfo, refreshRate = 3, widgetWidth = 450, widgetHeight = barHeight * 4 }
-netTooltip dev = defaultTooltip { makeWidget = makeZNetInfo dev, refreshRate = 3, widgetWidth = 400, widgetHeight = barHeight * 2 }
-cpuTopTooltip = defaultTooltip { makeWidget = makeZCpuTop, widgetHeight = barHeight * 4, widgetWidth = 270, refreshRate = 3 }
-batteryTooltip = defaultTooltip { makeWidget = makeZBatteryRate, refreshRate = 5, widgetWidth = 300 }
+memTooltip = defaultTooltip { makeWidget = makeZMemInfo, refreshRate = 3, widgetWidth = 1200, widgetHeight = barHeight * 4 }
+netTooltip dev = defaultTooltip { makeWidget = makeZNetInfo dev, refreshRate = 3, widgetWidth = 800, widgetHeight = barHeight * 2 }
+cpuTopTooltip = defaultTooltip { makeWidget = makeZCpuTop, widgetHeight = barHeight * 4, widgetWidth = 670, refreshRate = 3 }
+batteryTooltip = defaultTooltip { makeWidget = makeZBatteryRate, refreshRate = 5, widgetWidth = 800 }
 
 placeWidgets pos [] = [] -- FIXME: get rid of magic?
 placeWidgets pos [last] = last { widgetWidth = pos - (widgetX last) }:[] -- last widget takes remaining space
@@ -264,7 +267,7 @@ createTooltip dpy pos gState creatorId (Just widgetConfig) = do
       attrmask = cWOverrideRedirect
   w <- allocaSetWindowAttributes $ \attributes -> do
          set_override_redirect attributes True
-         createWindow dpy (defaultRootWindow dpy) (fi winPos) (fi 26)
+         createWindow dpy (defaultRootWindow dpy) (fi winPos) (fi 64)
                     (fi tooltipWidth) (fi $ widgetHeight widgetConfig) 0 copyFromParent
                     inputOutput visual attrmask attributes
 
@@ -372,7 +375,7 @@ main = do
   lowerWindow dpy w
   let strutValues = [0, 0, fi barHeight :: CLong, 0,
                      0, 0, 0, 0,
-                     0, 1360, 0, 0]
+                     0, 2160, 0, 0]
   strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
   changeProperty32 dpy w strutPartial cARDINAL propModeReplace strutValues
   strut <- internAtom dpy "_NET_WM_STRUT" False
@@ -601,7 +604,7 @@ zTextDisplayFilter global@(config, rs,wrs, ch) z = do
         width <- xftTextExtents (getDisplay rs) font msg >>= return . xglyphinfo_width
         let padding = ((widgetWidth config) - width) `div` 2
         withDraw rs $ \d -> withColor (textColor config) rs $ \c ->
-               xftDrawString d c font (widgetX config + padding) 18 msg
+               xftDrawString d c font (widgetX config + padding) textOffset msg
 
 zMultilineTextDisplayFilter global@(config, rs,wrs, ch) z = do
   let dpy = getDisplay rs
@@ -618,7 +621,7 @@ zMultilineTextDisplayFilter global@(config, rs,wrs, ch) z = do
       drawStrings strings height d c = drawOne 0 strings where
         drawOne y [] = return ()
         drawOne y (str : xs) = do
-          xftDrawString d c font x (y + 18) str
+          xftDrawString d c font x (y + textOffset) str
           drawOne (y + barHeight) xs
 
 
@@ -692,7 +695,7 @@ drawDzenXft font iconCache input rs wConf = do
     draw fg bg pos (Text msg : xs) d = do
       glyphInfo <- xftTextExtents dpy font msg
       withColor bg rs $ \c -> xftDrawRect d c pos 0 (xglyphinfo_xOff glyphInfo) barHeight
-      withColor fg rs $ \c -> xftDrawString d c font (pos + xglyphinfo_x glyphInfo) 18 msg
+      withColor fg rs $ \c -> xftDrawString d c font (pos + xglyphinfo_x glyphInfo) textOffset msg
       draw fg bg (pos + xglyphinfo_xOff glyphInfo) xs d
 
 
@@ -733,7 +736,7 @@ zClockWidget global@(config, rs, wrs, ch) z =
       time <- getCurrentTime
       timezone <- getCurrentTimeZone
       let localtime = utcToLocalTime timezone time
-      return $ formatTime defaultTimeLocale (timeFormat config) localtime
+      return $ formatTime Data.Time.defaultTimeLocale (timeFormat config) localtime
 
 loadavg = readFile "/proc/loadavg" >>= return . ("Load avg: "++)
                                        . join " " . take 3 . words

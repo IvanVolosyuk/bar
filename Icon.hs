@@ -30,14 +30,14 @@ data IconConfig = IconConfig { pickSize :: Int
                              }
 
 defaultIconConfig = IconConfig {
-   pickSize=16, postProcessing=(scaleNearest 22), bgColor="#000000FF",
+   pickSize=64, postProcessing=(scaleNearest 48), bgColor="#000000FF",
    cacheIcon=True
    }
 
 -- FIXME: move to client code
 myIconConfig = defaultIconConfig {
-   pickSize = 16,
-   postProcessing = shadow 2 "#00000050" . shift 0 (-1) . scaleLinear 25 . shadow 2 "#000000FF" . scaleLinear 64,
+   pickSize = 48,
+   postProcessing = shadow 2 "#00000050" . shift 0 (-1) . scaleLinear 48 . shadow 2 "#000000FF" . scaleLinear 128,
    cacheIcon = True,
    bgColor = "#BEBEBEFF"
    }

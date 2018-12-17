@@ -15,10 +15,12 @@ import System.Environment
 import System.IO
 import XMonad.Hooks.DynamicLog
 import XMonad.Hooks.ManageDocks
+import XMonad.Hooks.SetWMName
 import XMonad.Layout.WindowNavigation
 import XMonad.Layout.Decoration
 import XMonad.Layout.DecorationMadness
 import XMonad.Util.Run(spawnPipe)
+import Graphics.X11.ExtraTypes.XF86
 
 import qualified XMonad.StackSet as W
 import qualified Data.Map        as M
@@ -61,14 +63,14 @@ myFocusFollowsMouse = True
 
 -- Width of the window border in pixels.
 --
-myBorderWidth   = 1
+myBorderWidth   = 3
 
 -- modMask lets you specify which modkey you want to use. The default
 -- is mod1Mask ("left alt").  You may also consider using mod3Mask
 -- ("right alt"), which does not conflict with emacs keybindings. The
 -- "windows key" is usually mod4Mask.
 --
-myModMask       = mod1Mask
+myModMask       = mod4Mask
 
 -- The default number of workspaces (virtual screens) and their names.
 -- By default we use numeric strings, but any string may be used as a
@@ -136,7 +138,7 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm,               xK_equal  ), sendMessage Shrink)
 
     -- Push window back into tiling
-    -- , ((modm,               xK_t     ), withFocused $ windows . W.sink)
+    , ((modm,               xK_t     ), withFocused $ windows . W.sink)
 
     -- Increment the number of windows in the master area
     , ((modm              , xK_comma ), sendMessage (IncMasterN (-1)))
@@ -184,19 +186,25 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm .|. shiftMask,   xK_Right), sendMessage $ Swap L)
     , ((modm .|. shiftMask,   xK_Up   ), sendMessage $ Swap U)
     , ((modm .|. shiftMask,   xK_Down ), sendMessage $ Swap D)
-    , ((modm, xK_F2), spawn "gmrun")
-    , ((modm, xK_F4), kill)
-    , ((modm, xK_F4), kill)
+    , ((mod1Mask, xK_F2), spawn "gmrun")
+    , ((mod1Mask, xK_F4), kill)
+  --  , ((modm, xK_F4), kill)
     , ((modm, xK_Delete), kill)
     --, ((mod4Mask, xK_i), spawn "/usr/bin/fetchotp -x")
 
     , ((controlMask .|. mod1Mask, xK_l), spawn "dm-tool lock")
     , ((modm,                     xK_F1), spawn "dm-tool lock")
 
-    , ((controlMask, xK_F11             ), spawn "/home/ivan/opt/bin/volume down")
-    , ((controlMask, xK_F12             ), spawn "/home/ivan/opt/bin/volume up")
+    , ((mod1Mask, xK_space     ), spawn "/home/vol/opt/bin/toggle_synclient")
+    , ((0, xF86XK_AudioLowerVolume      ), spawn "/home/vol/opt/bin/volume down")
+    , ((0, xF86XK_AudioRaiseVolume      ), spawn "/home/vol/opt/bin/volume up")
+  --  , ((0, xF86XK_AudioLowerVolume      ), spawn "pactl set-sink-volume 1 -- -1.5%")
+  --  , ((0, xF86XK_AudioRaiseVolume      ), spawn "pactl set-sink-volume 1 +1.5%")
+    , ((0, xF86XK_MonBrightnessUp      ), spawn "/home/vol/opt/bin/xbacklight.sh up")
+    , ((0, xF86XK_MonBrightnessDown    ), spawn "/home/vol/opt/bin/xbacklight.sh down")
     , ((modm,               xK_a), sendMessage MirrorShrink)
     , ((modm,               xK_z), sendMessage MirrorExpand)
+    , ((modm, 0x70    ), spawn "/home/vol/opt/scripts/vidmode")
     ]
 
 
@@ -324,7 +332,9 @@ myLogHook xmproc = do
 -- per-workspace layout choices.
 --
 -- By default, do nothing.
-myStartupHook = return ()
+myStartupHook = do
+   setWMName "LG3D"
+   docksStartupHook
 
 ------------------------------------------------------------------------
 -- Now run xmonad with all the defaults we set up.
@@ -332,7 +342,7 @@ myStartupHook = return ()
 -- Run xmonad with the settings you specify. No need to modify this.
 --
 main = do
-  xmproc <- spawnPipe "/home/ivan/.xmonad/ivan/dzen.sh"
+  xmproc <- spawnPipe "/home/vol/.xmonad/ivan/dzen.sh"
   xmonad (defaults xmproc)
 
 -- A structure containing your configuration settings, overriding
