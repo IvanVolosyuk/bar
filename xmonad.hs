@@ -15,10 +15,11 @@ import System.Environment
 import System.IO
 import XMonad.Hooks.DynamicLog
 import XMonad.Hooks.ManageDocks
-import XMonad.Layout.WindowNavigation
+import XMonad.Layout.WindowNavigation as NAV
 import XMonad.Layout.Decoration
 import XMonad.Layout.DecorationMadness
 import XMonad.Util.Run(spawnPipe)
+import qualified XMonad.Hooks.ICCCMFocus as ICCCMFocus
 
 import qualified XMonad.StackSet as W
 import qualified Data.Map        as M
@@ -29,6 +30,14 @@ import XMonad.Layout.NoBorders
 import XMonad.Layout.Reflect
 import XMonad.Layout.ResizableTile
 import XMonad.Layout.ThreeColumns
+import XMonad.Layout.Roledex
+import XMonad.Layout.DecorationMadness
+import XMonad.Layout.MouseResizableTile
+import XMonad.Layout.MultiColumns
+import XMonad.Layout.Accordion
+import XMonad.Layout.BinarySpacePartition as BSP
+import XMonad.Layout.Dishes
+import XMonad.Layout.BorderResize
 
 import Control.Monad (when)
 import Data.List (delete)
@@ -38,16 +47,13 @@ import XMonad.Util.WindowProperties (getProp32)
 import Data.List (isPrefixOf)
 
 import XMonad.Hooks.ManageHelpers
-import XMonad.Hooks.ManageDocks
-
-import XMonad.Layout.DecorationMadness
-import XMonad.Layout.MouseResizableTile
 
 
 import XMonad.Hooks.UrgencyHook
 import qualified XMonad.StackSet as S
 import XMonad.Util.NamedWindows
 import System.Process
+import Graphics.X11.ExtraTypes.XF86
 
 
 -- The preferred terminal program, which is used in a binding below and by
@@ -127,16 +133,50 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     -- Swap the focused window with the previous window
     , ((modm .|. shiftMask, xK_k     ), windows W.swapUp    )
 
-    -- Shrink the master area
-    --, ((modm,               xK_h     ), sendMessage Expand)
-    , ((modm,               xK_minus ), sendMessage Expand)
+    , ((modm,                 xK_h ),                   sendMessage $ Go L)
+    , ((modm .|. shiftMask,   xK_h ),                   sendMessage $ NAV.Swap L)
+    , ((modm .|. controlMask, xK_h ),               do {sendMessage $ ExpandTowards L; sendMessage Expand})
+    , ((modm .|. shiftMask .|. controlMask, xK_h ), do {sendMessage $ ShrinkFrom L;    sendMessage Shrink})
+    , ((modm,                 xK_l ),                   sendMessage $ Go R)
+    , ((modm .|. shiftMask,   xK_l ),                   sendMessage $ NAV.Swap R)
+    , ((modm .|. controlMask, xK_l ),               do {sendMessage $ ExpandTowards R; sendMessage Shrink})
+    , ((modm .|. shiftMask .|. controlMask, xK_l ), do {sendMessage $ ShrinkFrom R;    sendMessage Expand})
+    , ((modm,                 xK_k ),                   sendMessage $ Go U)
+    , ((modm .|. shiftMask,   xK_k ),                   sendMessage $ NAV.Swap U)
+    , ((modm .|. controlMask, xK_k ),               do {sendMessage $ ExpandTowards U; sendMessage MirrorExpand})
+    , ((modm .|. shiftMask .|. controlMask, xK_k ), do {sendMessage $ ShrinkFrom U;    sendMessage MirrorShrink})
+    , ((modm,                 xK_j ),                   sendMessage $ Go D)
+    , ((modm .|. shiftMask,   xK_j ),                   sendMessage $ NAV.Swap D)
+    , ((modm .|. controlMask, xK_j ),               do {sendMessage $ ExpandTowards D; sendMessage MirrorShrink})
+    , ((modm .|. shiftMask .|. controlMask, xK_j ), do {sendMessage $ ShrinkFrom D;    sendMessage MirrorExpand})
+    , ((modm,    xK_r     ), sendMessage BSP.Rotate )
+    , ((modm,    xK_s     ), sendMessage BSP.Swap )
+    --, ((mod4Mask,             xK_Return), windows W.swapMaster)
+    , ((modm,                 xK_n     ), sendMessage FocusParent)
+    , ((modm .|. controlMask, xK_n     ), sendMessage SelectNode)
+    , ((modm .|. shiftMask,   xK_n     ), sendMessage MoveNode)
 
-    -- Expand the master area
-    , ((modm,               xK_l     ), sendMessage Shrink)
-    , ((modm,               xK_equal  ), sendMessage Shrink)
+    --, ((modm,                 xK_Left ), sendMessage $ Go L)
+    --, ((modm,                 xK_Right), sendMessage $ Go R)
+    --, ((modm,                 xK_Up   ), sendMessage $ Go U)
+    --, ((modm,                 xK_Down ), sendMessage $ Go D)
+    --, ((modm .|. shiftMask,   xK_Left ), sendMessage $ NAV.Swap L)
+    --, ((modm .|. shiftMask,   xK_Right), sendMessage $ NAV.Swap R)
+    --, ((modm .|. shiftMask,   xK_Up   ), sendMessage $ NAV.Swap U)
+    --, ((modm .|. shiftMask,   xK_Down ), sendMessage $ NAV.Swap D)
+    --, ((modm,               xK_minus ), do { sendMessage Expand ; sendMessage $ ShrinkFrom L })
+    --, ((modm .|. shiftMask, xK_minus ), sendMessage $ ShrinkFrom R )
+    --, ((modm,               xK_equal  ), do { sendMessage Shrink ; sendMessage $ ExpandTowards L })
+    --, ((modm .|. shiftMask, xK_equal  ), sendMessage $ ExpandTowards R )
+    --, ((modm,               xK_a), do {sendMessage MirrorShrink; sendMessage $ ExpandTowards D })
+    --, ((modm .|. shiftMask, xK_a), sendMessage $ ExpandTowards U )
+    --, ((modm,               xK_z), do {sendMessage MirrorExpand; sendMessage $ ShrinkFrom D })
+    --, ((modm .|. shiftMask, xK_z), sendMessage $ ShrinkFrom U )
+    --, ((mod4Mask,    xK_r     ), sendMessage BSP.Rotate )
+    --, ((mod4Mask,    xK_s     ), sendMessage BSP.Swap )
 
     -- Push window back into tiling
-    -- , ((modm,               xK_t     ), withFocused $ windows . W.sink)
+    , ((XMonad.mod4Mask,    xK_t     ), withFocused $ windows . W.sink)
 
     -- Increment the number of windows in the master area
     , ((modm              , xK_comma ), sendMessage (IncMasterN (-1)))
@@ -155,6 +195,8 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
 
     -- Restart xmonad
     , ((modm              , xK_q     ), spawn "xmonad --recompile; xmonad --restart")
+--    , ((controlMask       , xK_Print     ), spawn "echo attach  |nc localhost 12345 -q 0")
+    , ((controlMask       , xK_Print     ), spawn "DISPLAY=win8:0 konsole")
     ]
     ++
 
@@ -176,27 +218,18 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
         , (f, m) <- [(W.view, 0), (W.shift, shiftMask)]]
     ++
     [
-      ((modm,                 xK_Left ), sendMessage $ Go R)
-    , ((modm,                 xK_Right), sendMessage $ Go L)
-    , ((modm,                 xK_Up   ), sendMessage $ Go U)
-    , ((modm,                 xK_Down ), sendMessage $ Go D)
-    , ((modm .|. shiftMask,   xK_Left ), sendMessage $ Swap R)
-    , ((modm .|. shiftMask,   xK_Right), sendMessage $ Swap L)
-    , ((modm .|. shiftMask,   xK_Up   ), sendMessage $ Swap U)
-    , ((modm .|. shiftMask,   xK_Down ), sendMessage $ Swap D)
-    , ((modm, xK_F2), spawn "gmrun")
+      ((modm, xK_F2), spawn "gmrun")
     , ((modm, xK_F4), kill)
     , ((modm, xK_F4), kill)
     , ((modm, xK_Delete), kill)
     --, ((mod4Mask, xK_i), spawn "/usr/bin/fetchotp -x")
 
-    , ((controlMask .|. mod1Mask, xK_l), spawn "dm-tool lock")
+    --, ((controlMask .|. mod1Mask, xK_l), spawn "dm-tool lock")
     , ((modm,                     xK_F1), spawn "dm-tool lock")
 
     , ((controlMask, xK_F11             ), spawn "/home/ivan/opt/bin/volume down")
     , ((controlMask, xK_F12             ), spawn "/home/ivan/opt/bin/volume up")
-    , ((modm,               xK_a), sendMessage MirrorShrink)
-    , ((modm,               xK_z), sendMessage MirrorExpand)
+    , ((0, xF86XK_Calculator            ), spawn "/home/ivan/.xmonad/ivan/toggle_qemu_sound.sh")
     ]
 
 
@@ -231,14 +264,14 @@ myMouseBindings (XConfig {XMonad.modMask = modm}) = M.fromList $
 -- which denotes layout choice.
 --
 
-myLayout = avoidStruts $ reflectHoriz $ configurableNavigation noNavigateBorders $ layouts
+myLayout = avoidStruts $ borderResize $ configurableNavigation noNavigateBorders $ layouts
 -- ||| threeCol
   where
-     layouts = tiled ||| mirrorTiled ||| noBorders (Full)
+     layouts = tiled ||| emptyBSP ||| noBorders (Full)
 
-     tiled = ResizableTall nmaster delta ratio []
-     mirrorTiled = Mirror $ ResizableTall nmaster delta ratio []
-     threeCol = Mirror $ ThreeCol nmaster delta ratio
+     tiled = reflectHoriz $ ResizableTall nmaster delta ratio []
+     -- mirrorTiled = Mirror $ ResizableTall nmaster delta ratio []
+     -- threeCol = Mirror $ ThreeCol nmaster delta ratio
 
      -- The default number of windows in the master pane
      nmaster = 1
@@ -299,6 +332,7 @@ getIconData (Just winid) = return winid
 -- See the 'XMonad.Hooks.DynamicLog' extension for examples.
 --
 myLogHook xmproc = do
+    ICCCMFocus.takeTopFocus
     winset <- gets windowset
     urgents <- readUrgents
     sort' <- ppSort dzenPP
@@ -324,7 +358,7 @@ myLogHook xmproc = do
 -- per-workspace layout choices.
 --
 -- By default, do nothing.
-myStartupHook = return ()
+myStartupHook = docksStartupHook
 
 ------------------------------------------------------------------------
 -- Now run xmonad with all the defaults we set up.
