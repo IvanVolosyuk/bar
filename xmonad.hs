@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleInstances, TypeSynonymInstances, MultiParamTypeClasses #-}
 --
 -- xmonad example config file.
 --
@@ -38,6 +39,10 @@ import XMonad.Layout.Accordion
 import XMonad.Layout.BinarySpacePartition as BSP
 import XMonad.Layout.Dishes
 import XMonad.Layout.BorderResize
+import XMonad.Layout.MagicFocus
+import XMonad.Layout.Named
+import Data.List (isPrefixOf, isSuffixOf)
+import Control.Monad
 
 import Control.Monad (when)
 import Data.List (delete)
@@ -63,11 +68,11 @@ myTerminal      = "konsole"
 
 -- Whether focus follows the mouse pointer.
 myFocusFollowsMouse :: Bool
-myFocusFollowsMouse = True
+myFocusFollowsMouse = False
 
 -- Width of the window border in pixels.
 --
-myBorderWidth   = 1
+myBorderWidth   = 2
 
 -- modMask lets you specify which modkey you want to use. The default
 -- is mod1Mask ("left alt").  You may also consider using mod3Mask
@@ -149,12 +154,29 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm .|. shiftMask,   xK_j ),                   sendMessage $ NAV.Swap D)
     , ((modm .|. controlMask, xK_j ),               do {sendMessage $ ExpandTowards D; sendMessage MirrorShrink})
     , ((modm .|. shiftMask .|. controlMask, xK_j ), do {sendMessage $ ShrinkFrom D;    sendMessage MirrorExpand})
+
+    , ((modm,                 xK_Left ),                   sendMessage $ Go L)
+    , ((modm .|. shiftMask,   xK_Left ),                   sendMessage $ NAV.Swap L)
+    , ((modm .|. controlMask, xK_Left ),               do {sendMessage $ ExpandTowards L; sendMessage Expand})
+    , ((modm .|. shiftMask .|. controlMask, xK_Left ), do {sendMessage $ ShrinkFrom L;    sendMessage Shrink})
+    , ((modm,                 xK_Right ),                   sendMessage $ Go R)
+    , ((modm .|. shiftMask,   xK_Right ),                   sendMessage $ NAV.Swap R)
+    , ((modm .|. controlMask, xK_Right ),               do {sendMessage $ ExpandTowards R; sendMessage Shrink})
+    , ((modm .|. shiftMask .|. controlMask, xK_Right ), do {sendMessage $ ShrinkFrom R;    sendMessage Expand})
+    , ((modm,                 xK_Up ),                   sendMessage $ Go U)
+    , ((modm .|. shiftMask,   xK_Up ),                   sendMessage $ NAV.Swap U)
+    , ((modm .|. controlMask, xK_Up ),               do {sendMessage $ ExpandTowards U; sendMessage MirrorExpand})
+    , ((modm .|. shiftMask .|. controlMask, xK_Up ), do {sendMessage $ ShrinkFrom U;    sendMessage MirrorShrink})
+    , ((modm,                 xK_Down ),                   sendMessage $ Go D)
+    , ((modm .|. shiftMask,   xK_Down ),                   sendMessage $ NAV.Swap D)
+    , ((modm .|. controlMask, xK_Down ),               do {sendMessage $ ExpandTowards D; sendMessage MirrorShrink})
+    , ((modm .|. shiftMask .|. controlMask, xK_Down ), do {sendMessage $ ShrinkFrom D;    sendMessage MirrorExpand})
     , ((modm,    xK_r     ), sendMessage BSP.Rotate )
     , ((modm,    xK_s     ), sendMessage BSP.Swap )
     --, ((mod4Mask,             xK_Return), windows W.swapMaster)
-    , ((modm,                 xK_n     ), sendMessage FocusParent)
-    , ((modm .|. controlMask, xK_n     ), sendMessage SelectNode)
-    , ((modm .|. shiftMask,   xK_n     ), sendMessage MoveNode)
+    , ((modm , xK_c     ), sendMessage FocusParent)
+    , ((modm , xK_x     ), sendMessage SelectNode)
+    , ((modm , xK_v     ), sendMessage MoveNode)
 
     --, ((modm,                 xK_Left ), sendMessage $ Go L)
     --, ((modm,                 xK_Right), sendMessage $ Go R)
@@ -263,13 +285,46 @@ myMouseBindings (XConfig {XMonad.modMask = modm}) = M.fromList $
 -- The available layouts.  Note that each layout is separated by |||,
 -- which denotes layout choice.
 --
+data MyAccordion a = MyAccordion Rational Rational Rational deriving ( Read, Show )
+
+instance LayoutClass MyAccordion Window where
+    pureLayout (MyAccordion fract atten delta) sc ws = zip all (splitPropotional propotions sc)
+     where
+       
+       ups    = W.up ws
+       dns    = W.down ws
+       all    = (reverse ups)  ++ [W.focus ws] ++ dns
+
+       propotions = (reverse $ one (length ups) f) ++ [fract] ++ (one (length dns) f) where
+         f = (1 - fract) / 2
+         one 0 sz = []
+         one 1 sz = [sz]
+         one n sz = sz : (one (n-1) (sz / atten))
+
+
+       splitPropotional [_] rect = [rect]
+       splitPropotional (sz:sizes) rect = r0 : splitPropotional sizes rother where
+          (r0, rother) = splitVerticallyBy (sz / sum(sz:sizes)) rect
+
+    pureMessage (MyAccordion fract atten delta) m =
+            msum [fmap resize (fromMessage m), fmap mresize (fromMessage m)]
+
+      where resize Shrink             = MyAccordion (max (1-((1-fract)*delta)) 0.3) 2 delta
+            resize Expand             = MyAccordion (1-((1-fract)/delta)) 2 delta
+            mresize MirrorShrink      = MyAccordion fract (atten*delta) delta
+            mresize MirrorExpand      = MyAccordion fract (max (atten/delta) 1) delta
+
+isLayoutToll :: X Bool
+isLayoutToll = fmap (isSuffixOf "Preview") $ gets (description . S.layout . S.workspace . S.current . windowset)
 
 myLayout = avoidStruts $ borderResize $ configurableNavigation noNavigateBorders $ layouts
 -- ||| threeCol
   where
-     layouts = tiled ||| emptyBSP ||| noBorders (Full)
+     layouts = tiled ||| emptyBSP ||| accordion ||| preview ||| noBorders (Full)
 
-     tiled = reflectHoriz $ ResizableTall nmaster delta ratio []
+     tiled = named "Tiled" $ reflectHoriz $ ResizableTall nmaster delta ratio []
+     accordion = named "Accord" $ MyAccordion 0.8 2 1.5
+     preview = named "Preview" $ Mirror $ magicFocus $ Tall 1 (3/100) (1/2)
      -- mirrorTiled = Mirror $ ResizableTall nmaster delta ratio []
      -- threeCol = Mirror $ ThreeCol nmaster delta ratio
 
@@ -315,12 +370,14 @@ myManageHook = manageDocks <+> composeAll
 -- return (All True) if the default handler is to be run afterwards. To
 -- combine event hooks use mappend or mconcat from Data.Monoid.
 --
-myEventHook = mempty -- docksEventHook
+--myEventHook = mempty -- docksEventHook
+myEventHook = followOnlyIf (fmap not isLayoutToll)
 
 
 -- icon name = "^i(icons/"++name++".xpm) "
  
 myAddIcon iconName s = "{" ++ iconName ++ "}" ++ s
+addLayoutName text s = "[" ++ text ++ "] " ++ s
 
 getIconData Nothing = return ""
 getIconData (Just winid) = return winid
@@ -346,7 +403,7 @@ myLogHook xmproc = do
 
     dynamicLogWithPP $ dzenPP
                        { ppOutput = hPutStrLn xmproc
-                       , ppTitle = dzenColor "#202020" "" . myAddIcon iconData . shorten 150
+                       , ppTitle = addLayoutName ld . dzenColor "#202020" "" . myAddIcon iconData . shorten 150
                        , ppLayout = \x -> "  "
                        }
 
@@ -367,7 +424,7 @@ myStartupHook = docksStartupHook
 --
 main = do
   xmproc <- spawnPipe "/home/ivan/.xmonad/ivan/dzen.sh"
-  xmonad (defaults xmproc)
+  xmonad $ docks $ defaults xmproc
 
 -- A structure containing your configuration settings, overriding
 -- fields in the default config. Any you don't override, will
