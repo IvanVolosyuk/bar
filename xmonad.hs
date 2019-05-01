@@ -41,6 +41,11 @@ import XMonad.Layout.Dishes
 import XMonad.Layout.BorderResize
 import XMonad.Layout.MagicFocus
 import XMonad.Layout.Named
+import XMonad.Layout.Renamed
+import XMonad.Layout.SubLayouts
+import XMonad.Actions.CopyWindow
+import XMonad.Layout.Hidden as Hidden
+import XMonad.Util.XUtils as XUtils
 import Data.List (isPrefixOf, isSuffixOf)
 import Control.Monad
 
@@ -104,9 +109,6 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
 
     -- launch a terminal
     [ ((modm .|. shiftMask, xK_Return), spawn $ XMonad.terminal conf)
-
-    -- close focused window
-    , ((modm .|. shiftMask, xK_c     ), kill)
 
      -- Rotate through the available layout algorithms
     , ((modm,               xK_space ), sendMessage NextLayout)
@@ -174,28 +176,15 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     , ((modm,    xK_r     ), sendMessage BSP.Rotate )
     , ((modm,    xK_s     ), sendMessage BSP.Swap )
     --, ((mod4Mask,             xK_Return), windows W.swapMaster)
-    , ((modm , xK_c     ), sendMessage FocusParent)
-    , ((modm , xK_x     ), sendMessage SelectNode)
-    , ((modm , xK_v     ), sendMessage MoveNode)
+    , ((modm , xK_x     ), do {withFocused XUtils.hideWindow; withFocused Hidden.hideWindow})
+    , ((modm , xK_v     ), do {popNewestHiddenWindow; withFocused XUtils.showWindow})
 
-    --, ((modm,                 xK_Left ), sendMessage $ Go L)
-    --, ((modm,                 xK_Right), sendMessage $ Go R)
-    --, ((modm,                 xK_Up   ), sendMessage $ Go U)
-    --, ((modm,                 xK_Down ), sendMessage $ Go D)
-    --, ((modm .|. shiftMask,   xK_Left ), sendMessage $ NAV.Swap L)
-    --, ((modm .|. shiftMask,   xK_Right), sendMessage $ NAV.Swap R)
-    --, ((modm .|. shiftMask,   xK_Up   ), sendMessage $ NAV.Swap U)
-    --, ((modm .|. shiftMask,   xK_Down ), sendMessage $ NAV.Swap D)
-    --, ((modm,               xK_minus ), do { sendMessage Expand ; sendMessage $ ShrinkFrom L })
-    --, ((modm .|. shiftMask, xK_minus ), sendMessage $ ShrinkFrom R )
-    --, ((modm,               xK_equal  ), do { sendMessage Shrink ; sendMessage $ ExpandTowards L })
-    --, ((modm .|. shiftMask, xK_equal  ), sendMessage $ ExpandTowards R )
-    --, ((modm,               xK_a), do {sendMessage MirrorShrink; sendMessage $ ExpandTowards D })
-    --, ((modm .|. shiftMask, xK_a), sendMessage $ ExpandTowards U )
-    --, ((modm,               xK_z), do {sendMessage MirrorExpand; sendMessage $ ShrinkFrom D })
-    --, ((modm .|. shiftMask, xK_z), sendMessage $ ShrinkFrom U )
-    --, ((mod4Mask,    xK_r     ), sendMessage BSP.Rotate )
-    --, ((mod4Mask,    xK_s     ), sendMessage BSP.Swap )
+    , ((modm , xK_c     ), sendMessage FocusParent)
+    , ((modm , xK_a     ), sendMessage Equalize)
+    , ((modm .|. shiftMask, xK_a     ), sendMessage Balance)
+
+    , ((modm .|. controlMask, xK_m     ), sendMessage $ pullGroup U)
+    , ((modm .|. controlMask, xK_u     ), withFocused (sendMessage . UnMerge))
 
     -- Push window back into tiling
     , ((XMonad.mod4Mask,    xK_t     ), withFocused $ windows . W.sink)
@@ -227,8 +216,8 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     -- mod-shift-[1..9], Move client to workspace N
     --
     [((m .|. modm, k), windows $ f i)
-        | (i, k) <- zip (XMonad.workspaces conf) [xK_1 .. xK_9]
-        , (f, m) <- [(W.greedyView, 0), (W.shift, shiftMask)]]
+        | (i, k) <- zip (workspaces conf) [xK_1 ..]
+        , (f, m) <- [(W.view, 0), (W.shift, shiftMask), (copy, shiftMask .|. controlMask)]]
     ++
 
     --
@@ -241,9 +230,8 @@ myKeys conf@(XConfig {XMonad.modMask = modm}) = M.fromList $
     ++
     [
       ((modm, xK_F2), spawn "gmrun")
-    , ((modm, xK_F4), kill)
-    , ((modm, xK_F4), kill)
-    , ((modm, xK_Delete), kill)
+    , ((modm, xK_F4), kill1)
+    , ((modm, xK_Delete), kill1)
     --, ((mod4Mask, xK_i), spawn "/usr/bin/fetchotp -x")
 
     --, ((controlMask .|. mod1Mask, xK_l), spawn "dm-tool lock")
@@ -317,11 +305,12 @@ instance LayoutClass MyAccordion Window where
 isLayoutToll :: X Bool
 isLayoutToll = fmap (isSuffixOf "Preview") $ gets (description . S.layout . S.workspace . S.current . windowset)
 
-myLayout = avoidStruts $ borderResize $ configurableNavigation noNavigateBorders $ layouts
+myLayout = renamed [ CutWordsLeft 1] . avoidStruts . borderResize . hiddenWindows $ configurableNavigation noNavigateBorders $ layouts
 -- ||| threeCol
   where
-     layouts = tiled ||| emptyBSP ||| accordion ||| preview ||| noBorders (Full)
+     layouts = bsp ||| noBorders (Full)
 
+     bsp = subLayout [] (MyAccordion 0.8 2 1.5) $ emptyBSP
      tiled = named "Tiled" $ reflectHoriz $ ResizableTall nmaster delta ratio []
      accordion = named "Accord" $ MyAccordion 0.8 2 1.5
      preview = named "Preview" $ Mirror $ magicFocus $ Tall 1 (3/100) (1/2)
@@ -453,35 +442,3 @@ defaults xmproc = defaultConfig {
         logHook            = myLogHook xmproc,
         startupHook        = myStartupHook
     }
-
-
-fullscreenEventHook :: Event -> X All
-fullscreenEventHook (ClientMessageEvent _ _ _ dpy win typ (action:dats)) = do
-  state <- getAtom "_NET_WM_STATE"
-  fullsc <- getAtom "_NET_WM_STATE_FULLSCREEN"
-  wstate <- fromMaybe [] `fmap` getProp32 state win
-
-  let isFull = fromIntegral fullsc `elem` wstate
-
-      -- Constants for the _NET_WM_STATE protocol:
-      remove = 0
-      add = 1
-      toggle = 2
-      ptype = 4 -- The atom property type for changeProperty
-      chWstate f = io $ changeProperty32 dpy win state ptype propModeReplace (f wstate)
-
-  when (typ == state && fi fullsc `elem` dats) $ do
-    when (action == add || (action == toggle && not isFull)) $ do
-      chWstate (fi fullsc:)
-      windows $ W.float win $ W.RationalRect 0 0 1 1
-    when (action == remove || (action == toggle && isFull)) $ do
-      chWstate $ delete (fi fullsc)
-      windows $ W.sink win
-
-  return $ All True
-
-  -- DLM: Added to resolve a few dependencies:
-  where fi :: (Integral a, Num b) => a -> b
-        fi = fromIntegral
-
-fullscreenEventHook _ = return $ All True
