@@ -1,9 +1,10 @@
+{-# LANGUAGE RankNTypes, ExistentialQuantification #-}
 -- Copyright 2012 Google Inc. All Rights Reserved.
 -- Author: vol@google.com (Ivan Volosyuk)
 
 import Control.Concurrent
 import Control.Concurrent.Chan
-import Control.Monad.State (StateT, execStateT, runStateT, forever, liftIO, put)
+import Control.Monad.State (StateT, execStateT, runStateT, forever, liftIO, put, get)
 import Data.Bits
 import Data.List (find)
 import Data.Time
@@ -54,8 +55,9 @@ defaultFontName = "-*-fixed-medium-r-normal--15-*-*-*-*-*-iso10646-*"
 fixedFontName = "-*-courier new-*-r-normal-*-17-*-*-*-*-*-*-*"
 defaultTimeFormat = "%R"
 textPadding = 2
-trayerCmd rightMargin = printf "trayer --expand false --edge top --align right\
-             \ --widthtype request --height %d --margin %d" height rightMargin
+
+trayerCmd = printf "trayer --expand false --edge top --align right\
+             \ --widthtype request --height %d --margin %d" height
 
 wc = defaultWidget
 loadWidgets :: [WidgetConfig]
@@ -64,7 +66,7 @@ loadWidgets = [
    cpu,
    mem,
    -- battery,
-   -- (net "eth0") { widgetWidth = 40, refreshRate = 1 },
+   (net "brkvm") { widgetWidth = 40, refreshRate = 1 },
    trayer,
    title { widgetX = 10 }
    ]
@@ -100,7 +102,7 @@ mem = defaultWidget { makeWidget = makeZMemWidget, colorTable = memColorTable,
                       widgetTooltip = Just memTooltip, refreshRate = 120, onClick = Just "top.sh" }
 clock = defaultWidget { makeWidget = makeZClockWidget, widgetTooltip = Just clockTooltip, onClick = Just "clock.sh" }
 battery = defaultWidget { makeWidget = makeZBatteryWidget, widgetWidth = 100, refreshRate = 3,
-			   widgetTooltip = Just batteryTooltip }
+                          widgetTooltip = Just batteryTooltip }
 
 net dev = defaultWidget { makeWidget = makeZNetWidget dev, 
                           colorTable = netColorTable,
@@ -116,14 +118,14 @@ cpuTopTooltip = defaultTooltip { makeWidget = makeZCpuTop, widgetHeight = barHei
 batteryTooltip = defaultTooltip { makeWidget = makeZBatteryRate, refreshRate = 5, widgetWidth = 300 }
 
 placeWidgets pos [] = [] -- FIXME: get rid of magic?
-placeWidgets pos [last] = last { widgetWidth = pos - (widgetX last) }:[] -- last widget takes remaining space
+placeWidgets pos [last] = [last { widgetWidth = pos - widgetX last }] -- last widget takes remaining space
 placeWidgets pos (config:xs) =
-  let newpos = pos - (widgetWidth config) - (widgetPadding config) in -- FIXME: use widgetWidth and initialize it here?
+  let newpos = pos - widgetWidth config - widgetPadding config in -- FIXME: use widgetWidth and initialize it here?
   config { widgetX = newpos } : placeWidgets newpos xs
 
 initWidget rs wrs chan (widgetId, config) = do
   let config' = config { widgetId = widgetId }
-  widget <- (makeWidget config') (config', rs, wrs, chan)
+  widget <- makeWidget config' (config', rs, wrs, chan)
   return (widgetId, widget)
 
 height = barHeight - marginsVertical :: Int
@@ -162,7 +164,7 @@ data GlobalState = GlobalState { widgetsById :: M.Map Window (M.Map CInt Widget)
 
 data Widget = Widget {
     onDraw :: IO (),
-    doUpdate :: IO (ExtendedState),
+    doUpdate :: IO ExtendedState,
     onDestroy :: IO (),
     widgetConfig :: WidgetConfig,
     getRenderState :: RenderState,
@@ -174,8 +176,8 @@ drawWindow rs (WindowRenderState w gc) = do
   setfg rs backgroundColor
   fillRect rs 0 0 barWidth barHeight
 
-setfg (RenderState dpy w gc) color = setForeground dpy gc color
-setbg (RenderState dpy w gc) color = setBackground dpy gc color
+setfg (RenderState dpy w gc) = setForeground dpy gc
+setbg (RenderState dpy w gc) = setBackground dpy gc
 fillRect (RenderState dpy win gc) x y w h = fillRectangle dpy win gc (fi x) (fi y) (fi w) (fi h)
 
 drawWidget (widgetId,widget) = onDraw widget >>= \w -> return (widgetId, w)
@@ -185,21 +187,20 @@ data EventResult = Done | ExitEventLoop | Update GlobalState
 updateWindow = updateWindowRegion 0 barWidth
 
 updateWindowRegion x width widget = do
-  let RenderState dpy buf buf_gc = (getRenderState widget)
-  let WindowRenderState w gc = (getWindowRenderState widget)
+  let RenderState dpy buf buf_gc = getRenderState widget
+  let WindowRenderState w gc = getWindowRenderState widget
   copyArea dpy buf w gc x 0 (fi width) (fi $ widgetHeight . widgetConfig $ widget)
                             (fi x) 0
   sync dpy False
 
 handleMessage :: GlobalState -> Event -> IO EventResult
-handleMessage _ (ClientMessageEvent {ev_data = (-1):_}) = return ExitEventLoop
-handleMessage gState (ClientMessageEvent {ev_window = w, ev_data = widgetId:_}) = do
+handleMessage _ ClientMessageEvent {ev_data = (-1):_} = return ExitEventLoop
+handleMessage gState ClientMessageEvent {ev_window = w, ev_data = widgetId:_} = do
   -- print $ "Update for widget: " ++ (show widgetId)
   let widgetsMap = widgetsById gState
   case M.lookup w widgetsMap of
    Nothing -> return Done
-   Just windowWidgetMap -> do
-     --print $ "Window found!"
+   Just windowWidgetMap ->
      case M.lookup widgetId windowWidgetMap of
        Nothing -> return Done
        Just widget -> do
@@ -213,7 +214,7 @@ handleMessage gState (ClientMessageEvent {ev_window = w, ev_data = widgetId:_}) 
          let widgetsMap' = M.insert w windowWidgetMap' widgetsMap
          return . Update $ gState { widgetsById = widgetsMap' }
   
-handleMessage gState (ButtonEvent {ev_x = pos, ev_window = ww}) = do
+handleMessage gState ButtonEvent {ev_x = pos, ev_window = ww} = do
   let widgetsMap = widgetsById gState
   case M.lookup ww widgetsMap of
     Nothing -> return Done
@@ -227,7 +228,7 @@ handleMessage gState (ButtonEvent {ev_x = pos, ev_window = ww}) = do
              Nothing -> return Done
              Just cmdLine -> runCommand cmdLine >> return Done
 
-handleMessage gState (ExposeEvent {ev_window = w}) = do
+handleMessage gState ExposeEvent {ev_window = w} = do
   let widgetsMap = widgetsById gState
   case M.lookup w widgetsMap of
     Nothing -> return Done
@@ -235,24 +236,30 @@ handleMessage gState (ExposeEvent {ev_window = w}) = do
       let widgets = M.toList windowWidgetMap
       let (_,widget) = head widgets
       drawWindow (getRenderState widget) (getWindowRenderState widget)
-      mapM drawWidget widgets
+      mapM_ drawWidget widgets
       print "MapNotify: expensive redraw all"
       updateWindow widget
       return $ Update gState { widgetsById = M.insert w (M.fromList widgets) widgetsMap }
 
-handleMessage gState (MotionEvent {ev_x = pos, ev_window = ww, ev_event_display = dpy}) = do
+handleMessage gState MotionEvent {ev_x = pos, ev_window = ww, ev_event_display = dpy} =
   updateTooltip dpy gState ww pos
 
-handleMessage gState (CrossingEvent {ev_event_type = 7, ev_window = ww, ev_x = pos, ev_event_display = dpy}) = do -- EnterNotify
-  updateTooltip dpy gState ww pos
- 
-handleMessage gState (CrossingEvent {ev_event_type = 8, ev_window = ww, ev_event_display = dpy}) = do -- LeaveNotify
-  print "Leave! Destroying Window"
-  destroyTooltip dpy gState >>= return . Update
+handleMessage gState CrossingEvent {ev_event_type = typ,
+                                    ev_event_display = dpi,
+                                    ev_window = ww,
+                                    ev_x = pos } = do
+  let enter = 7 :: Int -- cannot put enterNotify inside the case??
+      leave = 8 :: Int
+  case typ of
+    7 -> updateTooltip dpi gState ww pos -- enterNotify
+    8 -> do -- leaveNotify
+      print "Leave! Destroying Window"
+      Update <$> destroyTooltip dpi gState
+    _ -> return Done
 
-handleMessage gState (AnyEvent {ev_event_type = 14}) = return Done -- NoExpose
+handleMessage gState AnyEvent {ev_event_type = 14} = return Done -- NoExpose
 
-handleMessage _ event = (print $ "Unhandled event:" ++ (eventName event) ++ ": " ++ (show event)) >> return Done
+handleMessage _ event = print ("Unhandled event:" ++ eventName event ++ ": " ++ show event) >> return Done
 
 
 createTooltip dpy pos gState creatorId Nothing = return Done
@@ -262,7 +269,7 @@ createTooltip dpy pos gState creatorId (Just widgetConfig) = do
   let tooltipWidth = widgetWidth widgetConfig
   let scr = (defaultScreen dpy)
   let visual = defaultVisual dpy scr
-  let winPos = (min barWidth ((fi pos) + (tooltipWidth `div` 2))) - tooltipWidth
+  let winPos = min barWidth (fi pos + (tooltipWidth `div` 2)) - tooltipWidth
       attrmask = cWOverrideRedirect
   w <- allocaSetWindowAttributes $ \attributes -> do
          set_override_redirect attributes True
@@ -297,7 +304,7 @@ createTooltip dpy pos gState creatorId (Just widgetConfig) = do
   let widgetsMap' = M.insert w (M.fromList widgets) widgetsMap
   return . Update $ gState { widgetsById = widgetsMap', tooltipWindow = Just (w, creatorId) }
 
-destroyTooltip dpy gState = do
+destroyTooltip dpy gState =
   case tooltipWindow gState of
     Nothing -> return gState
     Just (w,_) -> do
@@ -321,14 +328,14 @@ updateTooltip dpy gState ww pos = do
     Just windowWidgetMap -> do
       let mbWidget = find (containsPoint pos) $ M.toList windowWidgetMap
       case (mbWidget, tooltipWindow gState) of
-        (Nothing, Just _) ->  destroyTooltip dpy gState >>= return . Update
+        (Nothing, Just _) ->  Update <$> destroyTooltip dpy gState
         (Just (widgetId, widget), Nothing) -> createTooltip dpy pos gState widgetId (widgetTooltip . widgetConfig $ widget)
         (Just (widgetId, widget), Just (w, creatorId))
             | widgetId == creatorId -> return Done
             | widgetId /= creatorId -> do
                  gState <- destroyTooltip dpy gState
                  createTooltip dpy pos gState widgetId (widgetTooltip . widgetConfig $ widget)
-        otherwise -> return Done
+        _ -> return Done
 
 eventLoop dpy gState = do
   res <- allocaXEvent $ \ev -> do
@@ -356,12 +363,12 @@ copyChanToX chan = do
      (w,x) <- readChan chan
      -- print $ "Copy to X: " ++ (show x)
      sendClientEvent d a w (fi x) `catchIOError`  \x -> do
-       print $ "Exception caught: " ++ (show x)
+       print $ "Exception caught: " ++ show x
        return ()
 
 main = do
   dpy <- openDisplay "" -- FIXME: proper way to get display name
-  let scr = (defaultScreen dpy)
+  let scr = defaultScreen dpy
   let visual = defaultVisual dpy scr
   w <- createWindow dpy (defaultRootWindow dpy) (fi barX) (fi barY)
                         (fi barWidth) (fi barHeight)
@@ -409,21 +416,21 @@ main = do
   gState <- eventLoop dpy gState
   
   killThread eventCopyThread
-  mapM onDestroy . concat . map M.elems . M.elems . widgetsById $ gState
+  mapM onDestroy . concatMap M.elems . M.elems . widgetsById $ gState
   destroyWindow dpy w
   closeDisplay dpy
 
 makeSegment (x,y) = Segment x' y0' x' y1' where
   x' = fi x
-  y0' = (fi $ height - 1 + marginTop)
-  y1' = (fi $ height - 1 + marginTop) - (fi y)
+  y0' = fi $ height - 1 + marginTop
+  y1' = fi $ height - 1 + marginTop - fi y
 
 drawColorSegment rs@(RenderState dpy w gc) (segments, color) = do
   setfg rs color
   drawSegments dpy w gc segments
 
-getCpuData = readFile "/proc/stat" >>= return . map(read) . words . head . lines
-delta newar ar = map (pair (-)) $ zip newar ar
+getCpuData = map read . words . head . lines <$> readFile "/proc/stat"
+delta = zipWith (-)
 updateGraph samples sample = newSamples where
   newSamples = map (\(n,o) -> o++[n]) $ zip sample $ map (drop 1) samples
 accumulate = scanl (+)
@@ -436,6 +443,7 @@ readNetFile = readKeyValueFile $ map read . words
 dropZeros [] = []
 dropZeros ((i,0):xs) = dropZeros xs
 dropZeros ((i,v):xs) = (i,v) : dropZeros xs
+toColor = fst . head . readHex . tail
 
 data ZWidget s = ZWidget {
     zState :: s, -- mutable state
@@ -444,27 +452,28 @@ data ZWidget s = ZWidget {
     zOnDestroy :: s -> IO ()
 }
 
-toColor str = fst . head . readHex . tail $ str 
-
-zEmptyWidget (config, rs, wrs, ch) = return $ ZWidget { zOnDraw = \x -> return (), zDoUpdate = return, zOnDestroy = \x -> return (), zState = () }
+zEmptyWidget (config, rs, wrs, ch) = return ZWidget {
+  zOnDraw = \x -> return (),
+  zDoUpdate = return,
+  zOnDestroy = \x -> return (),
+  zState = ()
+}
 
 zAddFrame (config, rs, wrs, ch) z = return $ z { zOnDraw = draw' } where
-  draw' = case drawFrame config of
-    False -> zOnDraw z
-    True -> draw''
+  draw' = if drawFrame config then draw'' else zOnDraw z
   bg = toColor . frameBackgroundColor $ config
   x = widgetX config
   width = widgetWidth config
   draw'' s = do
-    (zOnDraw z) s
+    zOnDraw z s
     setfg rs bg
-    fillRect rs x marginTop width ((widgetHeight config) - marginsVertical)
+    fillRect rs x marginTop width $ widgetHeight config - marginsVertical
 
 
-zThreadWithIntervals firstIntervals makeState run global@(config, rs, wrs, ch) localChan = do
+zThreadWithIntervals firstIntervals run makeState global@(config, rs, wrs, ch) localChan = do
   time <- getCurrentTime
   state <- makeState >>= \x -> return $! x
-  let intervals = firstIntervals ++ (repeat $ refreshRate config)
+  let intervals = firstIntervals ++ repeat (refreshRate config)
   
   loop intervals time state where
     loop (interval:intervals) time state = do
@@ -472,16 +481,14 @@ zThreadWithIntervals firstIntervals makeState run global@(config, rs, wrs, ch) l
       newTime <- getCurrentTime
       let dt = getDt newTime time
       (output, newstate) <- run dt state >>= \x -> return $! x
-      writeChan ch ((getRealWindow wrs), (widgetId config))
+      writeChan ch (getRealWindow wrs, widgetId config)
       writeChan localChan output
       -- print $ "Delay: " ++ (show refresh)
       loop intervals newTime newstate
 
-zThread makeState run global@(config, rs, wrs, ch) localChan =
- zThreadWithIntervals [0.0] makeState run' global localChan where
-    run' = \_ -> run
+zThread run = zThreadWithIntervals [0.0] (const run)
 
-zStatelessThread run = zThread (return ()) wrappedRun where
+zStatelessThread run = zThread wrappedRun (return ()) where
   wrappedRun _ = run >>= \output -> return (output, ())
 
 zAddThreadFilter (thr, val) global@(config, rs, wrs, ch) z@(ZWidget init update draw destroy) = do
@@ -519,8 +526,8 @@ zGraphDisplayFilter global@(config, rs,wrs, ch) (ZWidget init@(s,sample) update 
 
   draw' (val, graph) = do
     draw val
-    let segments = map (\a -> map makeSegment $ dropZeros $ zip [pos..] a) graph -- FIXME: segments using x position
-    mapM (drawColorSegment rs) $ zip segments (colorTable config)
+    let segments = map (map makeSegment . dropZeros . zip [pos..]) graph -- FIXME: segments using x position
+    mapM_ (drawColorSegment rs) $ zip segments (colorTable config)
     return ()
      
   update' (s, graph) = do
@@ -532,10 +539,11 @@ zGraphDisplayFilter global@(config, rs,wrs, ch) (ZWidget init@(s,sample) update 
 zCpuWidget global@(config, rs, wrs, ch) z = 
   zAddThreadFilter (thr, val) global z >>= zGraphDisplayFilter global where
     val = replicate 4 0
-    thr = zThread getCpuData $ \procData -> do
-      newProcData <- getCpuData
-      let procDelta = delta newProcData procData
-      return (makeCpuSample procDelta, newProcData)
+    thr = zThread run getCpuData where
+      run procData = do
+        newProcData <- getCpuData
+        let procDelta = delta newProcData procData
+        return (makeCpuSample procDelta, newProcData)
 
 makeCpuSample :: [Int] -> [Dimension]
 makeCpuSample (_ :user:nice:sys:idle:io:tail) = map (makeLine total) values where
@@ -549,7 +557,7 @@ zMemWidget global@(config, rs, wrs, ch) z =
       return $ makeMemSample memState
 
 makeMemSample input = map (makeLine total) values where
-  total:free:cached:[] = map (read . (input !)) ["MemTotal", "MemFree", "Cached"]
+  [total,free,cached] = map (read . (input !)) ["MemTotal", "MemFree", "Cached"]
   values = [total - free, total - free - cached]
 
 getNetBytes input = [inbound, outbound] where
@@ -560,13 +568,14 @@ getNetBytes input = [inbound, outbound] where
 zNetWidget dev global@(config, rs, wrs, ch) z = 
   zAddThreadFilter (thr, val) global z >>= zGraphDisplayFilter global where
     val = replicate 3 0
-    thr = zThread (readNetFile "/proc/net/dev") $ \netState -> do
-      newNetState <- readNetFile "/proc/net/dev"
-      let netDelta = delta (newNetState ! dev) (netState ! dev)
-      -- print $ show $ makeNetSample netDelta
-      return ((makeNetSample netDelta), newNetState)
+    thr = zThread run (readNetFile "/proc/net/dev") where
+      run netState = do
+        newNetState <- readNetFile "/proc/net/dev"
+        let netDelta = delta (newNetState ! dev) (netState ! dev)
+        -- print $ show $ makeNetSample netDelta
+        return (makeNetSample netDelta, newNetState)
     f x = log (x + 1)
-    f2 x = (f x) * (f x)
+    f2 x = f x * f x
     maxF = (*2) . f2 $ 10000000 * refreshRate config -- max rate 10 Mb/s
     makeNetSample input = map (makeLine total) values where
       [inbound, outbound] = map f2 . getNetBytes $ input
@@ -590,11 +599,13 @@ zTextDisplayFilter global@(config, rs,wrs, ch) z = do
   widget font where
     widget font = return $ z { zOnDraw = draw' } where
       draw' val@(s, msg) = do
-        (zOnDraw z) val
-        width <- xftTextExtents (getDisplay rs) font msg >>= return . xglyphinfo_width
-        let padding = ((widgetWidth config) - width) `div` 2
+        zOnDraw z val
+        glyphInfo <- xftTextExtents (getDisplay rs) font msg
+        let [off, dx, dy, twidth] = map ($ glyphInfo) [xglyphinfo_xOff, xglyphinfo_x, xglyphinfo_y, xglyphinfo_width]
+        let [x, width, height] = map ($ config) [widgetX, widgetWidth, widgetHeight]
+            padding = (width - twidth) `div` 2
         withDraw rs $ \d -> withColor (textColor config) rs $ \c ->
-               xftDrawString d c font (widgetX config + padding) 18 msg
+               xftDrawString d c font (x + padding) ((height + dy) `div` 2) msg
 
 zMultilineTextDisplayFilter global@(config, rs,wrs, ch) z = do
   let dpy = getDisplay rs
@@ -603,15 +614,16 @@ zMultilineTextDisplayFilter global@(config, rs,wrs, ch) z = do
     widget font = return $ z { zOnDraw = draw' } where
       x = widgetX config + textPadding
       draw' val@(s, strings) = do
-        (zOnDraw z) val
-        height <- xftTextExtents (getDisplay rs) font "Az^.#" >>= return . xglyphinfo_height
+        zOnDraw z val
+        glyphInfo <- xftTextExtents (getDisplay rs) font "Az^.#"
         
         --print msg
-        withDraw rs $ \d -> withColor (textColor config) rs $ drawStrings strings height d
-      drawStrings strings height d c = drawOne 0 strings where
+        withDraw rs $ \d -> withColor (textColor config) rs $ drawStrings strings glyphInfo d
+      drawStrings strings glyphInfo d c = drawOne 0 strings where
         drawOne y [] = return ()
         drawOne y (str : xs) = do
-          xftDrawString d c font x (y + 18) str
+          let [height, dy] = map ($ glyphInfo) [xglyphinfo_height, xglyphinfo_y]
+          xftDrawString d c font x (y + (barHeight + dy) `div` 2) str
           drawOne (y + barHeight) xs
 
 
@@ -641,9 +653,7 @@ zDzenDisplayFilter global@(config, rs,wrs, ch) (ZWidget init update draw destroy
         draw s
         drawDzenXft font iconCache input rs config
 
-withDefault defaultColor color = case color of
-  "" -> defaultColor
-  otherwise -> color
+withDefault defaultColor color = if color == "" then defaultColor else color
 
 defaultVisualAndColormap rs = (dpy, w, vis, colormap) where
   (RenderState dpy w gc) = rs
@@ -651,10 +661,10 @@ defaultVisualAndColormap rs = (dpy, w, vis, colormap) where
   vis = defaultVisual dpy scr
   colormap = defaultColormap dpy scr
 
-withDraw rs action = withXftDraw dpy w vis colormap action where
+withDraw rs = withXftDraw dpy w vis colormap where
   (dpy, w, vis, colormap) = defaultVisualAndColormap rs
 
-withColor color rs action = withXftColorName dpy vis colormap color action where
+withColor color rs = withXftColorName dpy vis colormap color where
   (dpy, w, vis, colormap) = defaultVisualAndColormap rs
 
 drawDzenXft font iconCache input rs wConf = do
@@ -667,14 +677,14 @@ drawDzenXft font iconCache input rs wConf = do
     (RenderState dpy w gc) = rs
 
     draw _ _ pos [] d = do
-      let maxpos = (widgetX wConf) + (widgetWidth wConf)
+      let maxpos = widgetX wConf + widgetWidth wConf
       withColor backgroundColorString rs $ \c ->
         xftDrawRect d c pos 0 (maxpos - pos) barHeight
       return ()
 
     draw fg bg pos (Annotation Foreground fg' : xs) d = draw (withDefault foregroundColorString fg') bg pos xs d
     draw fg bg pos (Annotation Background bg' : xs) d = draw fg (withDefault backgroundColorString bg') pos xs d
-    draw fg bg pos (IconRef winid : xs) d = do
+    draw fg bg pos (IconRef winid : xs) d =
       case getIconImage (fi winid) iconCache  of
         Nothing -> draw fg bg pos xs d
 
@@ -684,9 +694,10 @@ drawDzenXft font iconCache input rs wConf = do
 
     draw fg bg pos (Text msg : xs) d = do
       glyphInfo <- xftTextExtents dpy font msg
-      withColor bg rs $ \c -> xftDrawRect d c pos 0 (xglyphinfo_xOff glyphInfo) barHeight
-      withColor fg rs $ \c -> xftDrawString d c font (pos + xglyphinfo_x glyphInfo) 18 msg
-      draw fg bg (pos + xglyphinfo_xOff glyphInfo) xs d
+      let [off, dx, dy] = map ($ glyphInfo) [xglyphinfo_xOff, xglyphinfo_x, xglyphinfo_y]
+      withColor bg rs $ \c -> xftDrawRect d c pos 0 off barHeight
+      withColor fg rs $ \c -> xftDrawString d c font (pos + dx) ((barHeight + dy) `div` 2) msg
+      draw fg bg (pos + off) xs d
 
 
 
@@ -702,7 +713,7 @@ zBatteryWidget global@(config, rs, wrs, ch) z =
           percent = remainingCapacity * 100 `div` capacity
       return $ case batteryState ! "charging state" of
         "discharging" | rate /= 0 -> printf "%d%%(%d:%02d)" percent h m
-        otherwise -> printf "%d%%C" percent
+        _ -> printf "%d%%C" percent
 
 zBatteryRateWidget global@(config, rs, wrs, ch) z =
   zAddThreadFilter (thr, "") global z >>= zTextDisplayFilter global where
@@ -719,15 +730,14 @@ zClockWidget global@(config, rs, wrs, ch) z =
       time <- getCurrentTime
       timezone <- getCurrentTimeZone
       let localtime = utcToLocalTime timezone time
-      return $ formatTime defaultTimeLocale (timeFormat config) localtime
+      return $ formatTime Data.Time.defaultTimeLocale (timeFormat config) localtime
 
-loadavg = readFile "/proc/loadavg" >>= return . ("Load avg: "++)
-                                       . join " " . take 3 . words
+loadavg = ("Load avg: "++) . join " " . take 3 . words <$> readFile "/proc/loadavg"
 
 zTopWidget global@(config, rs, wrs, ch) z = do
   startVal <- loadavg
   zAddThreadFilter (thread, [startVal]) global z >>= zMultilineTextDisplayFilter global where
-    thread = zThreadWithIntervals [0.6] pickCpuUsage makeOutput
+    thread = zThreadWithIntervals [0.6]  makeOutput pickCpuUsage
     makeOutput dt cpuMap = do
       newCpuMap <- pickCpuUsage
       avg <- loadavg
@@ -736,15 +746,15 @@ zTopWidget global@(config, rs, wrs, ch) z = do
 
 zNetInfoWidget dev global@(config, rs, wrs, ch) z = 
   zAddThreadFilter (thread, ["..."]) global z >>= zMultilineTextDisplayFilter global where
-    thread = zThreadWithIntervals [1.0] getInitialState makeOutput
-    getInitialState = getNetState >>= \x -> return $! (x, [0, 0], 0.0)
+    thread = zThreadWithIntervals [1.0]  makeOutput getInitialState
+    getInitialState = getNetState >>= \x -> return (x, [0, 0], 0.0)
     getNetState = readNetFile "/proc/net/dev" >>= \x -> return $! x
 
     makeOutput dt (netState, total, totalDt) = do
       newNetState <- getNetState
       let netDelta = delta (newNetState ! dev) (netState ! dev)
-          curr@[inbound, outbound] = map (bytes . (perSec dt)) . getNetBytes $ netDelta
-          total' = map (pair $ (+)) $ zip total $ getNetBytes netDelta
+          curr@[inbound, outbound] = map (bytes . perSec dt) . getNetBytes $ netDelta
+          total' = map (pair (+)) $ zip total $ getNetBytes netDelta
           totalDt' = totalDt + dt
           [avgIn, avgOut] = map (bytes . perSec totalDt') total'
           message = printf "In: %s/s : Out: %s/s" inbound outbound
@@ -760,14 +770,14 @@ zMemInfoWidget global@(config, rs, wrs, ch) z =
       let mem = map (\n -> printf "%7s: %4d MB" n (x M.! n)) values
       perPidInfo <- memInfo
       return perPidInfo
-      return $ map (pair $ (++)) $ zip mem perPidInfo
+      return $ map (pair (++)) $ zip mem perPidInfo
 
 zTrayerPlaceholder global@(config, rs, wrs, ch) z = do
-  handle <- runCommand . trayerCmd $ barWidth - (widgetX config) - (widgetWidth config)
+  handle <- runCommand . trayerCmd $ barWidth - widgetX config - widgetWidth config
   widget handle where
     widget handle = return $ z { zOnDestroy = destroy' } where
       destroy' s = do
-        (zOnDestroy z) s
+        zOnDestroy z s
         terminateProcess handle
 
 testStrings = [
@@ -791,7 +801,7 @@ makeZTrayer s = zEmptyWidget s >>= zTrayerPlaceholder s >>= zWrap s
 zWrap settings@(config, rs, wrs, ch) z@(ZWidget initialState update draw destroy) = return $ wrap initialState where
    wrap state = Widget {
      onDraw = draw state,
-     doUpdate = update state >>= return . wrap,
+     doUpdate = wrap <$> update state,
      onDestroy = destroy state,
      widgetConfig = config,
      getRenderState = rs,

@@ -5,17 +5,15 @@ module Top (
   memInfo
   ) where
 
-
-import System.Directory
-import Data.Char
-import Text.Printf
-import qualified Data.Map as M
-import System.IO.Error
 import Control.Concurrent
+import Data.Char
 import Data.Function
 import Data.List
-import Utils
+import qualified Data.Map as M
+import System.Directory
 import System.IO.Error
+import Text.Printf
+import Utils
 
 {-
 0 pid           process id
@@ -48,43 +46,43 @@ import System.IO.Error
 
 valuePicker selector file = (pid, (name, usage)) where
   w@(pid:rest) = words file
-  usage = selector (drop (length(w) - 52) w)
-  name = unwords $ take (length(w) - 51) rest
+  usage = selector $ drop (length w - 52) w
+  name = unwords $ take (length w - 51) rest
 
 makeCpuDiff newCpuInfo cpuInfo sec = do
-  let diff = M.elems $ M.differenceWith (\(n,a) (_,b) -> Just $ (n,a - b)) newCpuInfo cpuInfo
+  let diff = M.elems $ M.differenceWith (\(n,a) (_,b) -> Just (n,a - b)) newCpuInfo cpuInfo
   let active = filter ( (/= 0) . snd) diff
   print $ show active
-  let sorted = take 3 . reverse . sortBy (compare `on` snd) $ active
+  let sorted = take 3 . sortBy (flip compare `on` snd) $ active
   return $ map output sorted where
     output (name, val) = printf "   %2d%% - %s" (perSec sec val) name
 
 readFiles [] = return []
 readFiles (pid:pids) = do
-  content <- (readFile pid >>= return . Just) `catchIOError` \_ -> return Nothing
+  content <- (Just <$> readFile pid) `catchIOError` \_ -> return Nothing
   case content of
     Nothing -> readFiles pids
     Just c -> do
       others <- readFiles pids
-      return $ (c:others)
+      return (c:others)
   
 pickCpuUsage :: IO (M.Map String (String, Int))
-pickCpuUsage = pickProcValues cpuSelector >>= return . M.fromList
+pickCpuUsage = M.fromList <$> pickProcValues cpuSelector
 
 pickProcValues selector = do
   x <- getDirectoryContents "/proc"
-  let pids = map (printf "/proc/%s/stat") $ filter (isDigit . head) $ x :: [String]
+  let pids = map (printf "/proc/%s/stat") $ filter (isDigit . head) x :: [String]
   files <- readFiles pids
   return $! map (valuePicker selector) files
 
 memInfo = do
   mem <- pickProcValues memSelector :: IO [(String, (String, Int))]
-  return $! map display . take 4 . reverse . sortBy (compare `on` snd) . map (snd) $ mem where
+  return $! map display . take 4 . sortBy (flip compare `on` snd) . map snd $ mem where
     display (name, val) = printf " %7s - %s" (bytes val) name :: String
   
 
 cpuSelector = sum . map read . take 2 . drop 13
-memSelector = (*4096) . read . head . drop 23 :: [String] -> Int
+memSelector = (*4096) . read . (!!23) :: [String] -> Int
 
 main2 = do
   cpuInfo <- pickCpuUsage
