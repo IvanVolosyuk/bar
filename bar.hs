@@ -672,32 +672,33 @@ drawDzenXft font iconCache input rs wConf = do
   cache2 <- withDraw rs $ \d -> do
     xftDrawSetClipRectangles d 0 0 [Rectangle (fi $ widgetX wConf) 0
                                     (fi $ widgetWidth wConf) (fi barHeight)]
-    draw foregroundColorString backgroundColorString pos input d
+    draw pos input d
   return () where
     (RenderState dpy w gc) = rs
 
-    draw _ _ pos [] d = do
+    draw pos [] d = do
       let maxpos = widgetX wConf + widgetWidth wConf
       withColor backgroundColorString rs $ \c ->
         xftDrawRect d c pos 0 (maxpos - pos) barHeight
       return ()
 
-    draw fg bg pos (Annotation Foreground fg' : xs) d = draw (withDefault foregroundColorString fg') bg pos xs d
-    draw fg bg pos (Annotation Background bg' : xs) d = draw fg (withDefault backgroundColorString bg') pos xs d
-    draw fg bg pos (IconRef winid : xs) d =
+    draw pos (IconRef winid : xs) d =
       case getIconImage (fi winid) iconCache  of
-        Nothing -> draw fg bg pos xs d
+        Nothing -> draw pos xs d
 
         Just (CachedIcon width height img) -> do
           putImage dpy w gc img 0 0 (fi pos) 0 (fi width) (fi height)
-          draw fg bg (pos + width) xs d
+          draw (pos + width) xs d
 
-    draw fg bg pos (Text msg : xs) d = do
+    draw pos (Text fg bg msg : xs) d = do
+      let bg' = fromMaybe backgroundColorString bg
+          fg' = fromMaybe foregroundColorString fg
+      
       glyphInfo <- xftTextExtents dpy font msg
       let [off, dx, dy] = map ($ glyphInfo) [xglyphinfo_xOff, xglyphinfo_x, xglyphinfo_y]
-      withColor bg rs $ \c -> xftDrawRect d c pos 0 off barHeight
-      withColor fg rs $ \c -> xftDrawString d c font (pos + dx) ((barHeight + dy) `div` 2) msg
-      draw fg bg (pos + off) xs d
+      withColor bg' rs $ \c -> xftDrawRect d c pos 0 off barHeight
+      withColor fg' rs $ \c -> xftDrawString d c font (pos + dx) ((barHeight + dy) `div` 2) msg
+      draw (pos + off) xs d
 
 
 

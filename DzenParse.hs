@@ -1,7 +1,7 @@
 module DzenParse (
-  AnnotationType(..),
   Message(..),
-  parseLine
+  parseLine,
+  dzenMsg
   ) where
 
 import Text.ParserCombinators.Parsec
@@ -12,63 +12,50 @@ dzenMsg = "^fg(white)^bg(#2b4f98) 1 ^fg()^bg()^fg(black)^bg(#cccccc) 2 ^fg()^bg(
 
 parseLine :: String -> [Message]
 parseLine input = do
-   let res = parse parseMessage "(unknown)" input :: Either ParseError [Message]
+   let res = parse (parseMessage Nothing Nothing "") "(unknown)" input :: Either ParseError [Message]
    case res of
-     (Right x) -> mergeText . collapsRepeativeAnnotations
-                  . stripUnusedAnnotations $ x
-     (Left _) -> [ Text input ]
+     (Right x) -> mergeText x
+     (Left _) -> [ Text Nothing Nothing input ]
 
-data AnnotationType = Foreground | Background deriving (Show, Eq, Ord)
-data Message = Annotation AnnotationType String | IconRef Int
-              | Text String deriving (Show)
+data ColorType = Foreground | Background
+type MbColor = Maybe String
+data Message = Text MbColor MbColor String | IconRef Int deriving Show
 
-parseAnnotationType :: GenParser Char st AnnotationType
-parseAnnotationType = (string "fg" >> return Foreground)
-                  <|> (string "bg" >> return Background)
+parseColorType :: GenParser Char st ColorType
+parseColorType = (string "fg" >> return Foreground) <|> (string "bg" >> return Background)
 
-parseColor = many (noneOf ")")
+parseColor :: GenParser Char st MbColor
+parseColor = (\c -> if c == "" then Nothing else Just c) <$> many (noneOf ")") 
 
-parseMessage :: GenParser Char st [Message]
-parseMessage = try $ do
-           string "^"
-           typ <- parseAnnotationType
-           string "("
-           color <- parseColor
-           string ")"
-           text <- parseMessage
-           return $ Annotation typ color : text
-        <|> try (do
-           string "{"
-           winid <- many1 digit 
-           string "}"
-           text <- parseMessage
-           return $ IconRef (read winid) : text)
-        <|> do
-               c <- anyChar
-               rest <- parseMessage
-               return $ case rest of
-                 (Text msg : xs) -> Text (c:msg) : xs
-                 _ -> Text [c] : rest
-        <|> return []
-
-stripUnusedAnnotations = strip M.empty where
-  strip _ [] = []
-  strip m (x:xs) = case x of
-    (Annotation k _) -> strip (M.insert k x m) xs
-    _ -> M.elems m ++ (x : strip M.empty xs)
-
-collapsRepeativeAnnotations = collapse M.empty where
-  collapse _ [] = []
-  collapse m (x:xs) = case x of
-    (Annotation k v) ->
-       let oldv = M.lookup k m;
-           newv = Just v in
-       if oldv == newv
-          then collapse m xs
-          else x : collapse (M.insert k v m) xs
-    _ -> x : collapse m xs
+parseMessage :: MbColor -> MbColor -> String -> GenParser Char st [Message]
+parseMessage fg bg s = do
+  let wrapup f = do
+      rest <- f
+      return $ if s == "" then rest else Text fg bg (reverse s) : rest in
+       (do
+         string "^"
+         typ <- parseColorType
+         string "("
+         color <- parseColor
+         string ")"
+         wrapup $ case typ of
+           Foreground -> parseMessage color bg ""
+           Background -> parseMessage fg color "")
+       <|> (do
+         string "{"
+         winid <- many1 digit 
+         string "}"
+         rest <- wrapup $ parseMessage fg bg ""
+         return $ IconRef (read winid) : rest)
+       <|> (do
+         c <- anyChar
+         parseMessage fg bg (c : s))
+       <|> (wrapup $ return [])
 
 mergeText :: [Message] -> [Message]
 mergeText [] = []
-mergeText (Text t1 : Text t2 : xs) = mergeText (Text (t1 ++ t2) : xs)
+mergeText (t1@(Text fg1 bg1 s1) : t2@((Text fg2 bg2 s2) : xs)) = 
+  if fg1 == fg2 || bg1 == bg2
+  then mergeText (Text fg1 bg1 (s1 ++ s2) : xs)
+  else (t1 : mergeText t2)
 mergeText (x : xs) = x : mergeText xs
