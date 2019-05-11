@@ -302,26 +302,27 @@ drawStr dpy attr tattr font d yoff msg = do
 data DrawableMessage = DrawableText XftFont MbColor MbColor String Size Size Size 
                      | DrawableIcon
 
-drawMessage :: Display -> XftFont -> Message -> Size -> Size -> Size -> XftDraw -> IO ()
-drawMessage dpy font (Text fg bg msg) sz pos tpos d = do
+drawMessage :: Display -> XftDraw -> DrawableMessage -> IO ()
+drawMessage dpy d (DrawableText font fg bg msg sz pos tpos) = do
   let (Size ws hs, Size x y, Size tx ty) = (sz, pos, tpos)
   forM_ bg $ \c -> withColor dpy c $ \cc -> xftDrawRect d cc x y ws hs
   forM_ fg $ \c -> withColor dpy c $ \cc -> xftDrawString d cc font tx ty msg
-{-
-drawText :: RenderState -> WidgetAttributes -> TextAttributes
-            -> XftFont -> [Message] -> IO ()
-drawText rs x = withDraw rs $ \d -> do
-  _ <- xftDrawSetClipRectangles d 0 0 [Rectangle (fi x) (fi y) (fi ws) (fi hs)]
-  iterateM_ draw   where
-      draw pos = return 
--}
 
+drawMessage dpy d DrawableIcon =
+  return ()
 
-drawStringWidget :: RenderState -> Widget -> [String] -> XftFont -> Maybe XftDraw -> IO ()
-drawStringWidget rs@RenderState { display = dpy } wd strings font globalDraw = do
+drawSomething :: RenderState -> WidgetAttributes -> [DrawableMessage] -> Maybe XftDraw -> IO ()
+drawSomething rs wa msgs globalDraw = withDrawWidget rs globalDraw wa
+               $ \d -> mapM_ (drawMessage (display rs) d) msgs
+
+drawStringWidget :: RenderState -> Widget -> XftFont -> [String] -> Maybe XftDraw -> IO ()
+drawStringWidget rs@RenderState { display = dpy } wd font strings globalDraw = do
   let draw = drawStr dpy (attr_ wd) (tattr_ wd) font
   withDrawWidget rs globalDraw (attr_ wd) $ \d -> foldM_ (draw d) 0 strings
 
+makeTextPainter rs wd = do
+  fn <- makeFont rs (tattr_ wd)
+  return $ drawStringWidget rs wd fn
 
 repaint :: (RenderState, ControlChan, DrawRef) -> DrawCallback -> IO ()
 repaint (rs, ch, ref) drawable = do
@@ -341,41 +342,40 @@ runThread a f = void $ forkIO $ iterateM_ f a
 buildWidget :: (RenderState, ControlChan, DrawRef) -> Widget -> IO ()
 
 buildWidget (rs,_,ref) wd@Label { label_ = msg } = do
-  fn <- makeFont rs (tattr_ wd)
-  writeIORef ref $ drawStringWidget rs wd [msg] fn
+  draw <- makeTextPainter rs wd
+  writeIORef ref $ draw [msg]
 
-buildWidget ctx@(rs,ch,ref) wd@Latency {} = do
-  fn <- makeFont rs (tattr_ wd)
+buildWidget ctx@(rs,_,_) wd@Latency {} = do
+  draw <- makeTextPainter rs wd
   backChan <- newChan :: IO (Chan Char)
   ts <- getCurrentTime
   runThread ts $ \prev-> do
     ts <- getCurrentTime
     repaint ctx $ \d -> do
-      drawStringWidget rs wd [show $ diffUTCTime ts prev] fn d
+      draw [show $ diffUTCTime ts prev] d
       liftIO $ writeChan backChan '1'
     _ <- readChan backChan
     threadDelay 1
     return ts
 
-buildWidget ctx@(rs,ch,ref) wd@Clock {} = do
-  fn <- makeFont rs (tattr_ wd)
+buildWidget ctx@(rs,_,_) wd@Clock {} = do
+  draw <- makeTextPainter rs wd
   tz <- case tz_ wd of
           LocalTimeZone -> localTimezone
           OtherTimeZone z -> otherTimezone z
   -- Cache expensive timezone computation
   runStatelessThread $ do
     msg <- formatClock (fmt_ wd) tz
-    repaint ctx $ drawStringWidget rs wd [msg] fn
+    repaint ctx $ draw [msg]
     threadDelay 1000000
 
-buildWidget ctx@(rs,ch,ref) wd@Title {} = do
-  fn <- makeFont rs (tattr_ wd)
+buildWidget ctx@(rs,_,_) wd@Title {} = do
+  draw <- makeTextPainter rs wd
   thr <- myThreadId
-  runStatelessThread $ makeAction fn thr <$> tryIOError getLine >>= repaint ctx where
-    makeAction:: XftFont -> ThreadId -> Either IOError String -> DrawCallback
-    makeAction fn thr result = case result of
-      Left _ -> const $ liftIO $ killThread thr
-      Right msg -> drawStringWidget rs wd [msg] fn
+  let makeAction thr result = case result of
+        Left _ -> const $ liftIO $ killThread thr
+        Right msg -> draw [msg]
+  runStatelessThread $ makeAction thr <$> tryIOError getLine >>= repaint ctx
 
 reserve :: WidgetAttributes -> Size -> Size -> Orientation -> (WidgetAttributes, Size)
 reserve wa wpos wsz ort =
