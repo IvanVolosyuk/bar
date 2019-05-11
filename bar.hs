@@ -650,7 +650,7 @@ zDzenDisplayFilter global@(config, rs,wrs, ch) (ZWidget init update draw destroy
 
       loadIcons iconCache [] = return iconCache
       loadIcons iconCache (IconRef winid:xs) = do
-        iconCache' <- loadIconImage iconCache $ fi winid
+        iconCache' <- fst <$> loadIconImage iconCache (fi winid)
         loadIcons iconCache' xs
 
       loadIcons iconCache (x:xs) = loadIcons iconCache xs

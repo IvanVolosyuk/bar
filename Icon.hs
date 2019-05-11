@@ -63,12 +63,12 @@ bestMatch sz (icon:icons) = foldl betterIcon icon icons where
 
 defaultIcon = [1, 1, 0]
 
-loadIconImage :: IconCache -> Window -> IO IconCache
+loadIconImage :: IconCache -> Window -> IO (IconCache, CachedIcon)
 loadIconImage c@(IconCache dpy atom cache cfg) win =
   case M.lookup win cache of
      Just cachedIcon -> do
         print "Using cached icon"
-        return c
+        return (c, cachedIcon)
      Nothing -> do
        print "Start fetching icon data"
        iconRawData <- fetchIconData c win `catchIOError` \x -> return $ Just defaultIcon
@@ -85,7 +85,7 @@ loadIconImage c@(IconCache dpy atom cache cfg) win =
                                               (fromIntegral height) 32 0
        let cachedImage = CachedIcon width height img
        let newCache = c { getCache = M.insert win cachedImage cache }
-       return newCache
+       return (newCache, cachedImage)
 
 getIconImage :: Window -> IconCache -> Maybe CachedIcon
 getIconImage win cache = M.lookup win (getCache cache)

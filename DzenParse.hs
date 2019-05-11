@@ -33,7 +33,7 @@ parseMessage fg bg s =
   let wrapup f = do
       rest <- f
       return $ if s == "" then rest else Text fg bg (reverse s) : rest in
-       do
+       try (do
          _ <- string "^"
          typ <- parseColorType
          _ <- string "("
@@ -41,13 +41,13 @@ parseMessage fg bg s =
          _ <- string ")"
          wrapup (case typ of
            Foreground -> parseMessage color bg ""
-           Background -> parseMessage fg color "")
-       <|> do
+           Background -> parseMessage fg color ""))
+       <|> try (do
          _ <- string "{"
          winid <- many1 digit 
          _ <- string "}"
          rest <- wrapup (parseMessage fg bg "")
-         return (IconRef (read winid) : rest)
+         return (IconRef (read winid) : rest))
        <|> (do
          c <- anyChar
          parseMessage fg bg (c : s))

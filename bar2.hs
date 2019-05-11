@@ -212,7 +212,8 @@ formatClock fmt zoned = do
   zonedTime <- zoned time
   return $ formatTime Data.Time.defaultTimeLocale fmt zonedTime
 
-type DrawCallback = Maybe XftDraw -> IO ()
+type DrawCall a = StateT IconCache IO a
+type DrawCallback = Maybe XftDraw -> DrawCall ()
 type DrawRef = IORef DrawCallback
 type ControlChan = Chan ([Window] -> DrawCallback)
 data DrawableWidget = DrawableWidget Widget DrawRef
@@ -238,7 +239,8 @@ data ROState = ROState {
 
 data RWState = RWState {
   tooltip_ :: Maybe WindowState,
-  mouse_ :: Maybe Size
+  mouse_ :: Maybe Size,
+  iconCache_ :: IconCache
 }
 
 type RW a = StateT RWState (ReaderT ROState IO) a
@@ -263,63 +265,89 @@ withDraw :: RenderState  -> (XftDraw -> IO a) -> IO a
 withDraw  RenderState { display = dpy, buffer = w } = withXftDraw dpy w vis colormap where
   (vis, colormap) = visualColormap dpy
 
-withDrawWidget :: RenderState -> Maybe XftDraw -> WidgetAttributes -> (XftDraw -> IO ()) -> IO ()
+withDrawState :: RenderState -> (XftDraw -> DrawCall ()) -> DrawCall ()
+withDrawState rs action = do
+  s' <- get >>= \s -> liftIO $ withDraw rs $ \d -> execStateT (action d) s
+  put s'
+
+liftIconCache :: DrawCall () -> RW ()
+liftIconCache f = do
+  icons <- iconCache_ <$> get
+  icons' <- liftIO $ execStateT f icons
+  get >>= \s -> put s { iconCache_ = icons' }
+
+getIcon :: Window -> DrawCall CachedIcon
+getIcon w = do
+  icons <- get
+  (icons', img) <- liftIO $ loadIconImage icons w
+  put icons'
+  return img
+
+withDrawWidget :: RenderState -> Maybe XftDraw -> WidgetAttributes -> (XftDraw -> DrawCall ()) -> DrawCall ()
 withDrawWidget rs globalDraw attr action =
   case globalDraw of
     Just d -> action d
-    Nothing -> withDraw rs $ \d -> do
+    Nothing -> withDrawState rs $ \d -> do
         let WidgetAttributes (Size width height) (Size x y) _ _ _ _ = attr
         action d
-        copyToWindow rs (fi x) (fi y) (fi width) (fi height)
-        sync (display rs) False
+        liftIO $ copyToWindow rs (fi x) (fi y) (fi width) (fi height)
+        liftIO $ sync (display rs) False
 
 
 withColor :: Display -> String -> (XftColor -> IO ()) -> IO ()
 withColor dpy = withXftColorName dpy vis colormap where
   (vis, colormap) = visualColormap dpy
 
-drawStr :: Display -> WidgetAttributes -> TextAttributes
-             -> XftFont -> XftDraw -> Int -> String -> IO Int
-drawStr dpy attr tattr font d yoff msg = do
-  let WidgetAttributes sz pos  _ bg _ _ = attr
-  let TextAttributes fg justify _ = tattr
 
-  glyphInfo <- xftTextExtents dpy font msg
-  let Size ws hs = sz
-  let Size x y = pos
-  let [dx, dy, twidth] = map ($ glyphInfo) [
-       xglyphinfo_x, xglyphinfo_y, xglyphinfo_width]
+drawMessage rs attr tattr font d off (Text fg bg msg) = do
+  let WidgetAttributes sz pos  _ wbg _ _ = attr
+  let TextAttributes wfg justify _ = tattr
+  let dpy = display rs
+  glyphInfo <- liftIO $ xftTextExtents dpy font msg
+  let (Size ws hs, Size x y, Size xoff yoff) = (sz, pos, off)
+  let [dx, dy, twidth, txoff] = map ($ glyphInfo) [
+       xglyphinfo_x, xglyphinfo_y, xglyphinfo_width, xglyphinfo_xOff]
   let x' = x + case justify of
                   JustifyLeft -> dx
                   JustifyMiddle -> (ws - twidth) `div` 2
                   JustifyRight ->  ws - twidth
-  let y' = y + ((hs + dy) `div` 2) + yoff
-  _ <- xftDrawSetClipRectangles d 0 0 [Rectangle (fi x) (fi y) (fi ws) (fi hs)]
-  withColor dpy bg $ \c -> xftDrawRect d c x y ws hs
-  withColor dpy fg $ \c -> xftDrawString d c font x' y' msg
+  let y' = y + ((hs + dy) `div` 2)
+  let (fg', bg') = (fromMaybe wfg fg, fromMaybe wbg bg)
+  liftIO $ print (show msg ++ "  " ++ show x' ++ " " ++ show y' ++ " w:" ++ show twidth)
+  liftIO $ withColor dpy bg' $ \c -> xftDrawRect d c (x + xoff) (y + yoff) ws hs
+  liftIO $ withColor dpy fg' $ \c -> xftDrawString d c font (x' + xoff) (y' + yoff) msg
+  return $ Size (xoff + txoff) yoff
+
+drawMessage rs attr tattr font d off (IconRef wid) = do
+  let WidgetAttributes sz pos  _ wbg _ _ = attr
+  let (Size ws hs, Size x y, Size xoff yoff) = (sz, pos, off)
+  CachedIcon width height img <- getIcon $ fi wid
+  liftIO $ putImage (display rs) (buffer rs) (gc_ rs)
+           img 0 0 (fi $ x + xoff) (fi $ y + yoff + ((hs - height) `div` 2)) (fi width) (fi height)
+  return $ Size (xoff + width) yoff
+
+drawMessages :: RenderState -> WidgetAttributes -> TextAttributes
+             -> XftFont -> XftDraw -> Int -> [Message] -> DrawCall Int
+drawMessages rs attr tattr font d yoff msgs = do
+  let WidgetAttributes sz pos  _ _ _ _ = attr
+  let (Size ws hs, Size x y) = (sz, pos)
+  _ <- liftIO $ xftDrawSetClipRectangles d 0 0 [Rectangle (fi x) (fi y) (fi ws) (fi hs)]
+  foldM_ (drawMessage rs attr tattr font d) (Size 0 yoff) msgs
   return $ yoff + barHeight
 
-data DrawableMessage = DrawableText XftFont MbColor MbColor String Size Size Size 
-                     | DrawableIcon
+drawStr :: RenderState -> WidgetAttributes -> TextAttributes
+             -> XftFont -> XftDraw -> Int -> String -> DrawCall Int
+drawStr rs attr tattr font d yoff msg = do
+  let msgs = parseLine msg
+  liftIO $ print msgs
+  drawMessages rs attr tattr font d yoff msgs
 
-drawMessage :: Display -> XftDraw -> DrawableMessage -> IO ()
-drawMessage dpy d (DrawableText font fg bg msg sz pos tpos) = do
-  let (Size ws hs, Size x y, Size tx ty) = (sz, pos, tpos)
-  forM_ bg $ \c -> withColor dpy c $ \cc -> xftDrawRect d cc x y ws hs
-  forM_ fg $ \c -> withColor dpy c $ \cc -> xftDrawString d cc font tx ty msg
-
-drawMessage dpy d DrawableIcon =
-  return ()
-
-drawSomething :: RenderState -> WidgetAttributes -> [DrawableMessage] -> Maybe XftDraw -> IO ()
-drawSomething rs wa msgs globalDraw = withDrawWidget rs globalDraw wa
-               $ \d -> mapM_ (drawMessage (display rs) d) msgs
-
-drawStringWidget :: RenderState -> Widget -> XftFont -> [String] -> Maybe XftDraw -> IO ()
+drawStringWidget :: RenderState -> Widget -> XftFont -> [String] -> Maybe XftDraw -> DrawCall ()
 drawStringWidget rs@RenderState { display = dpy } wd font strings globalDraw = do
-  let draw = drawStr dpy (attr_ wd) (tattr_ wd) font
+  let draw = drawStr rs (attr_ wd) (tattr_ wd) font
   withDrawWidget rs globalDraw (attr_ wd) $ \d -> foldM_ (draw d) 0 strings
 
+makeTextPainter :: RenderState -> Widget -> IO ([String] -> DrawCallback)
 makeTextPainter rs wd = do
   fn <- makeFont rs (tattr_ wd)
   return $ drawStringWidget rs wd fn
@@ -329,7 +357,7 @@ repaint (rs, ch, ref) drawable = do
   tid <- myThreadId
   let drawable' winids d = do
           let w = window rs
-          if window rs `elem` winids then drawable d else killThread tid
+          if window rs `elem` winids then drawable d else liftIO (killThread tid)
   writeIORef ref drawable
   writeChan ch drawable'
 
@@ -414,17 +442,17 @@ layoutWidgets rs ch wsz orien wds = do
   print $ head out
   return out
 
-paintWindow :: WindowState -> IO ()
+paintWindow :: WindowState -> RW ()
 paintWindow (WindowState rs wds bg) = do
   let RenderState { display = dpy, windowWidth = width,
                     windowHeight = height } = rs
-  withDraw rs $ \d -> do
-    printf "%d x %d\n" width height
-    withColor dpy bg $ \c -> xftDrawRect d c (0::Int) (0::Int) width height
+  liftIconCache $ withDrawState rs $ \d -> do
+    liftIO $ printf "%d x %d\n" width height
+    liftIO $ withColor dpy bg $ \c -> xftDrawRect d c (0::Int) (0::Int) width height
     mapM_ (draw $ Just d) wds
-    copyToWindow rs 0 0 (fi width) (fi height)
-    sync dpy False where
-      draw :: Maybe XftDraw -> DrawableWidget -> IO ()
+    liftIO $ copyToWindow rs 0 0 (fi width) (fi height)
+    liftIO $ sync dpy False where
+      draw :: Maybe XftDraw -> DrawableWidget -> DrawCall ()
       draw d (DrawableWidget _ ref) = liftIO (readIORef ref) >>= \cb -> cb d
 
 windowMapAndSelectInput :: Display -> Window -> Word64 -> IO ()
@@ -495,7 +523,7 @@ inbounds WidgetAttributes {size = (Size ws hs), position = (Size wx wy)} (Size x
 updateTooltip :: Window -> Maybe Size -> RW ()
 updateTooltip ww next = do
   prev <- mouse_ <$> get
-  get >>= \s -> put $ s { mouse_ = next }
+  get >>= \s -> put s { mouse_ = next }
 
   liftIO $ printf "%s ->%s\n" (show prev) (show next)
   let insideWA wa p = fromMaybe False (p >>= inbounds wa)
@@ -520,14 +548,12 @@ handleEvent ExposeEvent { ev_window = w } = do
   wins <- reader windows
   tip <- tooltip_ <$> get
   let allwins = maybeToList tip ++ wins
-  liftIO $ mapM_ (\win -> when (w == (window . rs_) win) $ paintWindow win) allwins
+  mapM_ (\win -> when (w == (window . rs_) win) $ paintWindow win) allwins
 
 handleEvent ClientMessageEvent {} = do
   ch <- reader controlChan
   allWinIds <- map (window . rs_) <$> allWindows
-  -- join (readChan ch)
-  action  <- liftIO $ readChan ch
-  liftIO $ action allWinIds Nothing
+  liftIO (readChan ch) >>= \act -> liftIconCache $ act allWinIds Nothing
 
 handleEvent MotionEvent {ev_x = x, ev_y = y, ev_window = ww} = do
   let next = Just $ Size (fi x) (fi y)
@@ -629,9 +655,10 @@ main = do
   controlCh <- newChan :: IO ControlChan
 
   wins <- evalStateT (mapM (makeBar dpy controlCh) bars) True
+  icons <- makeIconCache dpy
 
   let ro = ROState { windows = wins, controlChan = controlCh }
-  let rw = RWState { tooltip_ = Nothing, mouse_ = Nothing }
+  let rw = RWState { tooltip_ = Nothing, mouse_ = Nothing, iconCache_ = icons }
 
   _ <- runReaderT (runStateT eventLoop rw) ro
   return ()
