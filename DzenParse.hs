@@ -1,11 +1,12 @@
 module DzenParse (
   Message(..),
+  MbColor,
   parseLine,
   dzenMsg
   ) where
 
+import Data.Map()
 import Text.ParserCombinators.Parsec
-import qualified Data.Map as M
 
 dzenMsg :: String
 dzenMsg = "^fg(white)^bg(#2b4f98) 1 ^fg()^bg()^fg(black)^bg(#cccccc) 2 ^fg()^bg()^fg(black)^bg(#cccccc) 3 ^fg()^bg()^fg(black)^bg(#cccccc) 9 ^fg()^bg()  ^fg(#202020){56623107}dzen.sh (~/.xmonad/ivan) - GVIM^fg()"
@@ -28,34 +29,34 @@ parseColor :: GenParser Char st MbColor
 parseColor = (\c -> if c == "" then Nothing else Just c) <$> many (noneOf ")") 
 
 parseMessage :: MbColor -> MbColor -> String -> GenParser Char st [Message]
-parseMessage fg bg s = do
+parseMessage fg bg s =
   let wrapup f = do
       rest <- f
       return $ if s == "" then rest else Text fg bg (reverse s) : rest in
-       (do
-         string "^"
+       do
+         _ <- string "^"
          typ <- parseColorType
-         string "("
+         _ <- string "("
          color <- parseColor
-         string ")"
-         wrapup $ case typ of
+         _ <- string ")"
+         wrapup (case typ of
            Foreground -> parseMessage color bg ""
            Background -> parseMessage fg color "")
-       <|> (do
-         string "{"
+       <|> do
+         _ <- string "{"
          winid <- many1 digit 
-         string "}"
-         rest <- wrapup $ parseMessage fg bg ""
-         return $ IconRef (read winid) : rest)
+         _ <- string "}"
+         rest <- wrapup (parseMessage fg bg "")
+         return (IconRef (read winid) : rest)
        <|> (do
          c <- anyChar
          parseMessage fg bg (c : s))
-       <|> (wrapup $ return [])
+       <|> wrapup (return [])
 
 mergeText :: [Message] -> [Message]
 mergeText [] = []
-mergeText (t1@(Text fg1 bg1 s1) : t2@((Text fg2 bg2 s2) : xs)) = 
+mergeText (t1@(Text fg1 bg1 s1) : t2@(Text fg2 bg2 s2 : xs)) = 
   if fg1 == fg2 || bg1 == bg2
   then mergeText (Text fg1 bg1 (s1 ++ s2) : xs)
-  else (t1 : mergeText t2)
+  else t1 : mergeText t2
 mergeText (x : xs) = x : mergeText xs

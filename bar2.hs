@@ -299,6 +299,14 @@ drawStr dpy attr tattr font d yoff msg = do
   withColor dpy fg $ \c -> xftDrawString d c font x' y' msg
   return $ yoff + barHeight
 
+data DrawableMessage = DrawableText XftFont MbColor MbColor String Size Size Size 
+                     | DrawableIcon
+
+drawMessage :: Display -> XftFont -> Message -> Size -> Size -> Size -> XftDraw -> IO ()
+drawMessage dpy font (Text fg bg msg) sz pos tpos d = do
+  let (Size ws hs, Size x y, Size tx ty) = (sz, pos, tpos)
+  forM_ bg $ \c -> withColor dpy c $ \cc -> xftDrawRect d cc x y ws hs
+  forM_ fg $ \c -> withColor dpy c $ \cc -> xftDrawString d cc font tx ty msg
 {-
 drawText :: RenderState -> WidgetAttributes -> TextAttributes
             -> XftFont -> [Message] -> IO ()
