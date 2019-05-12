@@ -12,8 +12,10 @@ import Data.Word
 import Foreign.Ptr
 import Graphics.X11.Xft
 import Graphics.X11.Xlib
+import Graphics.X11.Xlib.Color
 import Graphics.X11.Xlib.Extras
 import Graphics.X11.Xrender
+import Numeric
 import System.IO.Error
 import Text.Printf
 
@@ -45,6 +47,7 @@ bar1 = Bar barHeight {-screen-} 0 GravityBottom [
             Width 60 # RightPadding 4 #
             LocalTimeZone # BackgroundColor "#181838" #
             clockTooltip,
+        cpu # Width 120,
 
         title # LeftPadding 2 # RightPadding 2 #
                 BackgroundColor barBackground #
@@ -74,7 +77,7 @@ clockTooltip = Tooltip (Size 460 (barHeight * 2)) Horizontal [
                        ]
  ]
 
-tooltip w = w #BackgroundColor "#FFFFC0" #TextColor "#000000" 
+tooltip w = w #BackgroundColor "#FFFFC0" #TextColor "#000000"
               #TopPadding 0 #BottomPadding 1 #LeftPadding 0 #RightPadding 1
               #SetFont "-*-courier new-*-r-normal-*-17-*-*-*-*-*-*-*"
 
@@ -87,7 +90,7 @@ data Attribute = Width Int | Height Int | LeftPadding Int | RightPadding Int
 
 type Color = String
 type Font = String
-data Size = Size Int Int deriving Show
+data Size = Size {x_ :: Int, y_ :: Int} deriving Show
 type Pos = Size
 
 type OnClickCmd = String
@@ -144,7 +147,7 @@ instance Apply Attribute where
   apply (BackgroundColor c) ww = withAttr ww $ \attr -> let WidgetAttributes ws x p _ cmd tip = attr in
                                                      WidgetAttributes ws x p c cmd tip
   apply (TimeFormat fmt) ww = ww { fmt_ = fmt }
-  apply (Message s) ww = ww { label_ = s } 
+  apply (Message s) ww = ww { label_ = s }
 
 instance Num Size where
   (+) (Size x0 y0) (Size x1 y1) = Size (x0 + x1) (y0 + y1)
@@ -163,22 +166,26 @@ data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_
           | Title   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
           | Latency {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
           | Frame   {attr_ :: WidgetAttributes, orient_ :: Orientation, children_ :: [Widget]}
+          | CpuGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double}
           deriving Show
 
 defaultAttr :: WidgetAttributes
 defaultAttr = WidgetAttributes (Size 5000 barHeight) 0 (Padding 1 1) "#181838" Nothing Nothing
 
 defaultTAttr :: TextAttributes
-defaultTAttr = TextAttributes "#C7AE86" JustifyMiddle "-*-*-medium-r-normal--15-*-*-*-*-*-iso10646-*" 
+defaultTAttr = TextAttributes "#C7AE86" JustifyMiddle "-*-*-medium-r-normal--15-*-*-*-*-*-iso10646-*"
 
 clock :: Widget
 clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone
+
+cpu :: Widget
+cpu = CpuGraph defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 0.05
 
 label :: Widget
 label = Label defaultAttr defaultTAttr ""
 
 title :: Widget
-title = Title defaultAttr defaultTAttr # Width 4000 
+title = Title defaultAttr defaultTAttr # Width 4000
 
 latency :: Widget
 latency = Latency defaultAttr defaultTAttr
@@ -313,8 +320,8 @@ drawMessage rs attr tattr font d off (Text fg bg msg) = do
                   JustifyRight ->  ws - txoff
   let y' = y + ((hs + dy) `div` 2)
   let (fg', bg') = (fromMaybe wfg fg, fromMaybe wbg bg)
-  liftIO $ print (show msg ++ "  " ++ show x' ++ " " ++ show y' ++ " w:" ++ show txoff)
-  liftIO $ withColor dpy bg' $ \c -> xftDrawRect d c (x + xoff) (y + yoff) ws hs
+  -- liftIO $ print (show msg ++ "  " ++ show x' ++ " " ++ show y' ++ " w:" ++ show txoff)
+  liftIO $ drawRect dpy d bg' (x + xoff) (y + yoff) ws hs
   liftIO $ withColor dpy fg' $ \c -> xftDrawString d c font (x' + xoff) (y' + yoff) msg
   return $ Size (xoff + txoff) yoff
 
@@ -339,7 +346,6 @@ drawStr :: RenderState -> WidgetAttributes -> TextAttributes
              -> XftFont -> XftDraw -> Int -> String -> DrawCall Int
 drawStr rs attr tattr font d yoff msg = do
   let msgs = parseLine msg
-  liftIO $ print msgs
   drawMessages rs attr tattr font d yoff msgs
 
 drawStringWidget :: RenderState -> Widget -> XftFont -> [String] -> Maybe XftDraw -> DrawCall ()
@@ -405,6 +411,43 @@ buildWidget ctx@(rs,_,_) wd@Title {} = do
         Right msg -> draw [msg]
   runStatelessThread $ makeAction thr <$> tryIOError getLine >>= repaint ctx
 
+buildWidget ctx@(rs,_,_) wd@(CpuGraph attr colors refresh) = do
+  let WidgetAttributes sz pos  _ bg _ _ = attr
+      (Size ws hs, Size x0 y0) = (sz, pos)
+      readCPU = map read . tail. words . head . lines <$> readFile "/proc/stat"
+  cpu <- readCPU
+  let graph = replicate (length cpu) $ replicate ws 0
+  let colorTable = map toColor colors
+
+  runThread (cpu,graph) $ \(cpu',graph')-> do
+    cpu'' <- readCPU
+    let (user:nice:sys:idle:io:_) = zipWith (-) cpu'' cpu'
+        (total:points) = reverse $ scanl (+) 0 [sys + io, nice, user, idle]
+        sample = map ((`div` (if total == 0 then 1 else total)) . (*hs)) points
+        graph'' = map (\(n,o) -> o++[n]) $ zip sample $ map tail graph'
+
+    repaint ctx $ \gd ->
+      withDrawWidget rs gd attr $ \d -> liftIO $ do
+        drawRect (display rs) d bg x0 y0 ws hs
+        -- drawSegments (Segment ) 0xFF8080
+        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd) . zip [x0..]) graph'
+        mapM_ (drawColorSegment rs) $ zip segments  colorTable
+    threadDelay $ round (1000000 * refresh)
+    return (cpu'', graph'')
+
+makeSegment y0 height (x,y) = Segment x' y0' x' y1' where
+  x' = fi x
+  y0' = fi $ height - 1 + y0
+  y1' = fi $ height - 1 + y0 - fi y
+
+drawColorSegment rs (segments, color) = do
+  let RenderState {display = dpy, buffer = w, gc_ = gc} = rs
+  setForeground dpy gc color
+  drawSegments dpy w gc segments
+
+toColor = fst . head . readHex . tail
+drawRect dpy d bg x y w h = withColor dpy bg $ \c -> xftDrawRect d c x y w h
+
 reserve :: WidgetAttributes -> Size -> Size -> Orientation -> (WidgetAttributes, Size)
 reserve wa wpos wsz ort =
   let WidgetAttributes sz _ p@(Padding plt prb) bg cmd tip = wa
@@ -448,7 +491,7 @@ paintWindow (WindowState rs wds bg) = do
                     windowHeight = height } = rs
   liftIconCache $ withDrawState rs $ \d -> do
     liftIO $ printf "%d x %d\n" width height
-    liftIO $ withColor dpy bg $ \c -> xftDrawRect d c (0::Int) (0::Int) width height
+    liftIO $ drawRect dpy d bg 0 0 width height
     mapM_ (draw $ Just d) wds
     liftIO $ copyToWindow rs 0 0 (fi width) (fi height)
     liftIO $ sync dpy False where
@@ -534,7 +577,7 @@ updateTooltip ww next = do
         update' False True rs' wd' = do
                liftIO $ print $ "Create tooltip requested: " ++ show wd'
                forM_ (mbtooltip . attr_ $ wd') (createTooltip rs' wd')
-        
+
         update' True False _ _ = deleteTooltip
         update' _ _ _ _ = return ()
 
@@ -567,7 +610,7 @@ handleEvent CrossingEvent {ev_event_type = typ,
 
 handleEvent AnyEvent {ev_event_type = 14} = return () -- NoExpose
 
-handleEvent event@_ = 
+handleEvent event@_ =
   liftIO $ print $ "Unhandled event:" ++
     eventName event ++ ": " ++ show event
 
@@ -577,7 +620,7 @@ eventLoop = forever $ do
   event <- liftIO $ allocaXEvent $ \ev -> do
     liftIO $ nextEvent dpy ev
     getEvent ev
-  
+
   handleEvent event
 
 sendClientEvent :: Display -> Atom -> Window -> Atom -> IO ()
@@ -608,7 +651,7 @@ makeBar dpy controlCh (Bar height screenNum gravity wds) = do
     let visual = defaultVisual dpy scr
     let width = fi $ displayWidth dpy scr
     let scrHeight = displayHeight dpy scr
-    
+
     -- left, right, top, bottom,
     -- left_start_y, left_end_y, right_start_y, right_end_y,
     -- top_start_x, top_end_x, bottom_start_x, bottom_end_x
@@ -619,32 +662,32 @@ makeBar dpy controlCh (Bar height screenNum gravity wds) = do
         else (fi scrHeight - height, [0, 0, 0, fi height,
                        0, 0, 0, 0,
                        0, 0, 0, fi width ])
-    
+
     w <- createWindow dpy (defaultRootWindow dpy) 0 (fi y) (fi width) (fi height)
                       0 copyFromParent inputOutput visual 0 nullPtr
     gc <- createGC dpy w
     buf <- createPixmap dpy w (fi width) (fi height) (defaultDepth dpy scr)
-    
+
     let rs = RenderState { display = dpy, window = w, buffer = buf, gc_ = gc,
                                    windowWidth = width, windowHeight = height }
     when cc $ void $ forkOS $ copyChanToX controlCh w
-    
+
     strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
     changeProperty32 dpy w strutPartial cARDINAL propModeReplace strutValues
     strut <- internAtom dpy "_NET_WM_STRUT" False
     changeProperty32 dpy w strut cARDINAL propModeReplace (take 4 strutValues)
-    
+
     dockAtom <- internAtom dpy "_NET_WM_WINDOW_TYPE_DOCK" False
     winType <- internAtom dpy "_NET_WM_WINDOW_TYPE" False
     changeProperty32 dpy w winType aTOM propModeReplace [fi dockAtom]
-    
+
     windowMapAndSelectInput dpy w $ exposureMask
                                 .|. structureNotifyMask
-                                .|. buttonPressMask 
+                                .|. buttonPressMask
                                 .|. enterWindowMask
                                 .|. leaveWindowMask
                                 .|. pointerMotionMask
-    
+
     widgets <- layoutWidgets rs controlCh (Size width height) Horizontal wds
     return $ WindowState rs widgets barBackground
 
