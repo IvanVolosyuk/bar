@@ -40,8 +40,8 @@ tooltipBackground :: String
 tooltipBackground = "#505050"
 
 bars :: [Bar]
--- bars = [bar1, bar2]
-bars = [bar1]
+bars = [bar1, bar2]
+-- bars = [bar1]
 
 bar1 :: Bar
 bar1 = Bar barHeight {-screen-} 0 GravityBottom [
@@ -125,7 +125,7 @@ data WidgetAttributes = WidgetAttributes {
 data TimeScale = LinearTime | LogTime Int deriving Show
 
 
-data Bar = Bar Int Int Gravity [Widget] deriving Show
+data Bar = Bar Int ScreenNumber Gravity [Widget] deriving Show
 data Tooltip = Tooltip Size Orientation [Widget] deriving Show
 
 class Apply a where
@@ -171,6 +171,7 @@ instance Num Size where
   abs (Size x y) = Size (abs x) (abs y)
   signum (Size x y) = Size (signum x) (signum y)
   fromInteger a = Size (fi a) (fi a)
+half (Size w h) = Size (w `div` 2) (h `div` 2)
 
 infixl 9 #
 (#) :: (Apply a) => Widget -> a  -> Widget
@@ -249,7 +250,8 @@ data RenderState = RenderState {
   buffer :: Pixmap,
   gc_ :: GC,
   windowWidth :: Int,
-  windowHeight :: Int
+  windowHeight :: Int,
+  screenNum :: ScreenNumber
 }
 
 data WindowState = WindowState {
@@ -506,12 +508,13 @@ drawColorSegment rs (segments, color) = do
 toColor = fst . head . readHex . tail
 drawRect dpy d bg x y w h = withColor dpy bg $ \c -> xftDrawRect d c x y w h
 
+flp o = if o == Horizontal then Vertical else Horizontal
+dir o = if o == Horizontal then Size 1 0 else Size 0 1
+clamp (Size w h) = Size (max 0 w) (max 0 h)
+
 reserve :: WidgetAttributes -> Size -> Size -> Orientation -> (WidgetAttributes, Size)
 reserve wa wpos wsz ort =
   let WidgetAttributes sz _ p@(Padding plt prb) bg cmd tip = wa
-      flp o = if o == Horizontal then Vertical else Horizontal
-      dir o = if o == Horizontal then Size 1 0 else Size 0 1
-      clamp (Size w h) = Size (max 0 w) (max 0 h)
       newpos = clamp $ wsz - dir ort * (sz + plt + prb)
       sz' = wsz - dir ort * newpos - plt - prb
       pos' = wpos + dir ort * newpos + plt
@@ -564,20 +567,28 @@ windowMapAndSelectInput dpy w mask = do
   flush dpy
 
 createTooltip :: RenderState -> Widget -> Tooltip -> RW ()
-createTooltip parent_rs parent tip = do
+createTooltip parent_rs pwd tip = do
   let dpy = display parent_rs
-  let Tooltip (Size width height) orien widgets = tip
-  liftIO $ print "Enter! Creating Window"
-  let barWidth = 1920 -- FIXME
-  let pos = 1920 - 300
+  let Tooltip sz@(Size width height) orien widgets = tip
 
-  let scr = defaultScreen dpy
+  parent <- liftIO $ getWindowAttributes dpy (window parent_rs)
+  let WidgetAttributes ws pos _ _ _ _ = attr_ pwd
+  let wpos = Size (fi $ wa_x parent) (fi $ wa_y parent)
+  let place = if y_ wpos == 0
+                 then wpos + pos + ws * dir Vertical - half ws * dir Horizontal - Size 0 2
+                 else wpos + pos - half ws * dir Horizontal - sz * dir Vertical + Size 0 2
+  let screenWidth = fi $ displayWidth dpy (screenNum parent_rs)
+  let x = max 2 $ min (x_ place) (screenWidth - width - 2)
+
+  liftIO $ print $ "Enter! Creating Window " ++ show place ++ " wpos " ++ show wpos
+
+  let scr = screenNum parent_rs
   let visual = defaultVisual dpy scr
-  let winPos = min barWidth  (pos + (width `div` 2)) - width
       attrmask = cWOverrideRedirect
   w <- liftIO $ allocaSetWindowAttributes $ \attributes -> do
          set_override_redirect attributes True
-         createWindow dpy (defaultRootWindow dpy) (fi winPos) (fi barHeight)
+         createWindow dpy (rootWindowOfScreen (screenOfDisplay dpy scr))
+                    (fi x) (fi $ y_ place)
                     (fi width) (fi height) 0 copyFromParent
                     inputOutput visual attrmask attributes
 
@@ -592,7 +603,7 @@ createTooltip parent_rs parent tip = do
 
   liftIO $ windowMapAndSelectInput dpy w (structureNotifyMask .|. exposureMask)
 
-  let rs = RenderState dpy w buf gc width height
+  let rs = RenderState dpy w buf gc width height (screenNum parent_rs)
   ch <- reader controlChan
   widgets' <- liftIO $ layoutWidgets rs ch (Size width height) orien widgets
   get >>= \s -> put s { tooltip_ = Just $ WindowState rs widgets' tooltipBackground }
@@ -701,12 +712,10 @@ copyChanToX chan w = do
        sync d False
 
 makeBar :: Display -> ControlChan -> Bar -> StateT Bool IO WindowState
-makeBar dpy controlCh (Bar height screenNum gravity wds) = do
+makeBar dpy controlCh (Bar height scr gravity wds) = do
   cc <- get
   put False
   liftIO $ do
-    let scr = fi screenNum
-    let visual = defaultVisual dpy scr
     let width = fi $ displayWidth dpy scr
     let scrHeight = displayHeight dpy scr
 
@@ -721,13 +730,15 @@ makeBar dpy controlCh (Bar height screenNum gravity wds) = do
                        0, 0, 0, 0,
                        0, 0, 0, fi width ])
 
-    w <- createWindow dpy (defaultRootWindow dpy) 0 (fi y) (fi width) (fi height)
-                      0 copyFromParent inputOutput visual 0 nullPtr
+    w <- createWindow dpy (rootWindowOfScreen (screenOfDisplay dpy scr))
+                      0 (fi y) (fi width) (fi height)
+                      0 copyFromParent inputOutput (defaultVisual dpy scr) 0 nullPtr
     gc <- createGC dpy w
     buf <- createPixmap dpy w (fi width) (fi height) (defaultDepth dpy scr)
 
     let rs = RenderState { display = dpy, window = w, buffer = buf, gc_ = gc,
-                                   windowWidth = width, windowHeight = height }
+                                   windowWidth = width, windowHeight = height,
+                                   screenNum = scr}
     when cc $ void $ forkOS $ copyChanToX controlCh w
 
     strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
