@@ -21,6 +21,7 @@ import Text.Printf
 
 import DzenParse
 import Icon
+import Top
 
 barHeight :: Int
 barHeight = 24
@@ -39,7 +40,8 @@ tooltipBackground :: String
 tooltipBackground = "#505050"
 
 bars :: [Bar]
-bars = [bar1, bar2]
+-- bars = [bar1, bar2]
+bars = [bar1]
 
 bar1 :: Bar
 bar1 = Bar barHeight {-screen-} 0 GravityBottom [
@@ -47,7 +49,7 @@ bar1 = Bar barHeight {-screen-} 0 GravityBottom [
             Width 60 # RightPadding 4 #
             LocalTimeZone # BackgroundColor "#181838" #
             clockTooltip,
-        cpu # Width 120,
+        cpu # Width 120 #cpuTooltip,
 
         title # LeftPadding 2 # RightPadding 2 #
                 BackgroundColor barBackground #
@@ -72,21 +74,30 @@ clockTooltip = Tooltip (Size 460 (barHeight * 2)) Horizontal [
                          tooltipClock
                        ] #Width 340,
         frame Vertical [
-           tooltip label #Message "MTV:  " #JustifyRight,
-           tooltip label #Message "Local:  " #JustifyRight
+           tooltipLabel #Message "MTV: " #JustifyRight,
+           tooltipLabel #Message "Local: " #JustifyRight
                        ]
  ]
 
-tooltip w = w #BackgroundColor "#FFFFC0" #TextColor "#000000"
+cpuTooltip = Tooltip (Size 300 (4*barHeight)) Horizontal [
+     tooltipText cpuTop #Height (4*barHeight) #Width 280,
+     tooltip cpu #RefreshRate 0.1 # Width 20 #LinearTime
+     ]
+
+tooltip w = w #BackgroundColor "#FFFFC0"
               #TopPadding 0 #BottomPadding 1 #LeftPadding 0 #RightPadding 1
+
+tooltipText w = tooltip w  #TextColor "#000000"
               #SetFont "-*-courier new-*-r-normal-*-17-*-*-*-*-*-*-*"
 
-tooltipClock = tooltip clock #TimeFormat "%a, %e %b %Y - %X"
+tooltipClock = tooltipText clock #TimeFormat "%a, %e %b %Y - %X"
+tooltipLabel = tooltipText label
 
 data Attribute = Width Int | Height Int | LeftPadding Int | RightPadding Int
                | TopPadding Int | BottomPadding Int
                | TextColor Main.Color | BackgroundColor Main.Color
                | TimeFormat String | Message String | SetFont String
+               | RefreshRate Double
 
 type Color = String
 type Font = String
@@ -101,7 +112,7 @@ data Orientation = Horizontal | Vertical deriving (Show, Eq)
 data ClockTimeZone = LocalTimeZone | OtherTimeZone String deriving Show
 data Justify = JustifyLeft | JustifyMiddle | JustifyRight deriving Show
 data Padding = Padding Size Size deriving Show
-data TextAttributes = TextAttributes Main.Color Justify Main.Font deriving Show
+data TextAttributes = TextAttributes Main.Color Justify Main.Font Int deriving Show
 data WidgetAttributes = WidgetAttributes {
   size :: Size,
   position :: Pos,
@@ -109,6 +120,9 @@ data WidgetAttributes = WidgetAttributes {
   color :: Main.Color,
   onclick :: Maybe OnClickCmd,
   mbtooltip :: Maybe Tooltip } deriving Show
+
+-- int = n linear points before 2x compression
+data TimeScale = LinearTime | LogTime Int deriving Show
 
 
 data Bar = Bar Int Int Gravity [Widget] deriving Show
@@ -121,24 +135,24 @@ instance Apply ClockTimeZone where
   apply tz ww = ww { tz_ = tz }
 
 instance Apply Justify where
-  apply j ww = let TextAttributes c _ f = tattr_ ww in ww { tattr_ = TextAttributes c j f }
+  apply j ww = let TextAttributes c _ f hs = tattr_ ww in ww { tattr_ = TextAttributes c j f hs}
+
+instance Apply TimeScale where
+  apply t ww = ww { timeScale_ = t }
 
 instance Apply Tooltip where
   apply tip ww = let WidgetAttributes ws x p c cmd _ = attr_ ww
                    in ww { attr_ = WidgetAttributes ws x p c cmd (Just tip) }
 
 withAttr ww f = ww { attr_ = f (attr_ ww) }
-withPadding ww f = withAttr ww $ \wa -> let WidgetAttributes ws x p c cmd tip = wa in
-    WidgetAttributes ws x (f p) c cmd tip
+withPadding ww f = withAttr ww $ \wa -> wa { padding = f (padding wa) }
 
 instance Apply Attribute where
-  apply (TextColor c) ww = let TextAttributes _ j f = tattr_ ww in ww { tattr_ = TextAttributes c j f }
-  apply (SetFont f) ww = let TextAttributes c j _ = tattr_ ww in ww { tattr_ = TextAttributes c j f }
+  apply (TextColor c) ww = let TextAttributes _ j f hs = tattr_ ww in ww { tattr_ = TextAttributes c j f hs}
+  apply (SetFont f) ww = let TextAttributes c j _ hs = tattr_ ww in ww { tattr_ = TextAttributes c j f hs}
 
-  apply (Width w) ww = let WidgetAttributes (Size _ h) x p c cmd tip = attr_ ww
-                           in ww { attr_ = WidgetAttributes (Size w h) x p c cmd tip}
-  apply (Height h) ww = let WidgetAttributes (Size w _) x p c cmd tip = attr_ ww
-                           in ww { attr_ = WidgetAttributes (Size w h) x p c cmd tip}
+  apply (Width w) ww = withAttr ww $ \wa -> wa { size = Size w (y_ . size $ wa)}
+  apply (Height h) ww = withAttr ww $ \wa -> wa { size = Size (x_ . size $ wa) h}
 
   apply (LeftPadding l) ww = withPadding ww $ \p -> let Padding (Size _ t) pbr = p in Padding (Size l t) pbr
   apply (TopPadding t) ww = withPadding ww $ \p -> let Padding (Size l _) pbr = p in Padding (Size l t) pbr
@@ -148,6 +162,7 @@ instance Apply Attribute where
                                                      WidgetAttributes ws x p c cmd tip
   apply (TimeFormat fmt) ww = ww { fmt_ = fmt }
   apply (Message s) ww = ww { label_ = s }
+  apply (RefreshRate r) ww = ww { refreshRate = r }
 
 instance Num Size where
   (+) (Size x0 y0) (Size x1 y1) = Size (x0 + x1) (y0 + y1)
@@ -164,22 +179,23 @@ infixl 9 #
 data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_ :: String, tz_ :: ClockTimeZone }
           | Label   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, label_ ::  String }
           | Title   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
+          | CpuTop  {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Double}
           | Latency {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
           | Frame   {attr_ :: WidgetAttributes, orient_ :: Orientation, children_ :: [Widget]}
-          | CpuGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double}
+          | CpuGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double, timeScale_ :: TimeScale}
           deriving Show
 
 defaultAttr :: WidgetAttributes
 defaultAttr = WidgetAttributes (Size 5000 barHeight) 0 (Padding 1 1) "#181838" Nothing Nothing
 
 defaultTAttr :: TextAttributes
-defaultTAttr = TextAttributes "#C7AE86" JustifyMiddle "-*-*-medium-r-normal--15-*-*-*-*-*-iso10646-*"
+defaultTAttr = TextAttributes "#C7AE86" JustifyMiddle "-*-*-medium-r-normal--15-*-*-*-*-*-iso10646-*" barHeight
 
 clock :: Widget
 clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone
 
 cpu :: Widget
-cpu = CpuGraph defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 0.05
+cpu = CpuGraph defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 1 (LogTime 5)
 
 label :: Widget
 label = Label defaultAttr defaultTAttr ""
@@ -190,12 +206,15 @@ title = Title defaultAttr defaultTAttr # Width 4000
 latency :: Widget
 latency = Latency defaultAttr defaultTAttr
 
+cpuTop :: Widget
+cpuTop = CpuTop defaultAttr defaultTAttr 3 # JustifyLeft
+
 frame :: Orientation -> [Widget] -> Widget
 frame = Frame (WidgetAttributes (Size 5000 barHeight) 0 (Padding 0 0)
                                "#181838" Nothing Nothing)
 
 makeFont :: RenderState -> TextAttributes -> IO XftFont
-makeFont RenderState { display = dpy } (TextAttributes _ _ fontName) =
+makeFont RenderState { display = dpy } (TextAttributes _ _ fontName _) =
   xftFontOpenXlfd dpy (defaultScreenOfDisplay dpy) fontName
 
 localTimezone :: IO (UTCTime -> IO ZonedTime)
@@ -308,50 +327,48 @@ withColor dpy = withXftColorName dpy vis colormap where
 
 drawMessage rs attr tattr font d off (Text fg bg msg) = do
   let WidgetAttributes sz pos  _ wbg _ _ = attr
-  let TextAttributes wfg justify _ = tattr
+  let TextAttributes wfg justify _ ths = tattr
   let dpy = display rs
   glyphInfo <- liftIO $ xftTextExtents dpy font msg
-  let (Size ws hs, Size x y, Size xoff yoff) = (sz, pos, off)
+  let (Size ws _, Size x y, Size xoff yoff) = (sz, pos, off)
   let [dx, dy, twidth, txoff] = map ($ glyphInfo) [
        xglyphinfo_x, xglyphinfo_y, xglyphinfo_width, xglyphinfo_xOff]
   let x' = x + case justify of
                   JustifyLeft -> dx
                   JustifyMiddle -> (ws - txoff) `div` 2
                   JustifyRight ->  ws - txoff
-  let y' = y + ((hs + dy) `div` 2)
-  let (fg', bg') = (fromMaybe wfg fg, fromMaybe wbg bg)
+  let y' = y + ((ths + dy) `div` 2)
+  let fg' = fromMaybe wfg fg
   -- liftIO $ print (show msg ++ "  " ++ show x' ++ " " ++ show y' ++ " w:" ++ show txoff)
-  liftIO $ drawRect dpy d bg' (x + xoff) (y + yoff) ws hs
+  liftIO $ forM_ bg $ \c -> drawRect dpy d c (x + xoff) (y + yoff) ws ths
   liftIO $ withColor dpy fg' $ \c -> xftDrawString d c font (x' + xoff) (y' + yoff) msg
   return $ Size (xoff + txoff) yoff
 
 drawMessage rs attr tattr font d off (IconRef wid) = do
   let WidgetAttributes sz pos  _ wbg _ _ = attr
-  let (Size ws hs, Size x y, Size xoff yoff) = (sz, pos, off)
+  let (Size ws _, Size x y, Size xoff yoff) = (sz, pos, off)
+  let TextAttributes _ _ _ ths = tattr
   CachedIcon width height img <- getIcon $ fi wid
   liftIO $ putImage (display rs) (buffer rs) (gc_ rs)
-           img 0 0 (fi $ x + xoff) (fi $ y + yoff + ((hs - height) `div` 2)) (fi width) (fi height)
+           img 0 0 (fi $ x + xoff) (fi $ y + yoff + ((ths - height) `div` 2)) (fi width) (fi height)
   return $ Size (xoff + width) yoff
 
 drawMessages :: RenderState -> WidgetAttributes -> TextAttributes
-             -> XftFont -> XftDraw -> Int -> [Message] -> DrawCall Int
-drawMessages rs attr tattr font d yoff msgs = do
-  let WidgetAttributes sz pos  _ _ _ _ = attr
-  let (Size ws hs, Size x y) = (sz, pos)
-  _ <- liftIO $ xftDrawSetClipRectangles d 0 0 [Rectangle (fi x) (fi y) (fi ws) (fi hs)]
-  foldM_ (drawMessage rs attr tattr font d) (Size 0 yoff) msgs
-  return $ yoff + barHeight
-
-drawStr :: RenderState -> WidgetAttributes -> TextAttributes
              -> XftFont -> XftDraw -> Int -> String -> DrawCall Int
-drawStr rs attr tattr font d yoff msg = do
-  let msgs = parseLine msg
-  drawMessages rs attr tattr font d yoff msgs
+drawMessages rs attr tattr font d yoff msg = do
+  let TextAttributes _ _ _ ths = tattr
+  foldM_ (drawMessage rs attr tattr font d) (Size 0 yoff) (parseLine msg)
+  return $ yoff + ths
 
 drawStringWidget :: RenderState -> Widget -> XftFont -> [String] -> Maybe XftDraw -> DrawCall ()
 drawStringWidget rs@RenderState { display = dpy } wd font strings globalDraw = do
-  let draw = drawStr rs (attr_ wd) (tattr_ wd) font
-  withDrawWidget rs globalDraw (attr_ wd) $ \d -> foldM_ (draw d) 0 strings
+  let draw = drawMessages rs (attr_ wd) (tattr_ wd) font
+  withDrawWidget rs globalDraw (attr_ wd) $ \d -> do
+    let WidgetAttributes sz pos  _ wbg _ _ = attr_ wd
+    let (Size ws hs, Size x y) = (sz, pos)
+    _ <- liftIO $ xftDrawSetClipRectangles d 0 0 [Rectangle (fi x) (fi y) (fi ws) (fi hs)]
+    liftIO $ drawRect (display rs) d wbg x y ws hs
+    foldM_ (draw d) 0 strings
 
 makeTextPainter :: RenderState -> Widget -> IO ([String] -> DrawCallback)
 makeTextPainter rs wd = do
@@ -411,12 +428,12 @@ buildWidget ctx@(rs,_,_) wd@Title {} = do
         Right msg -> draw [msg]
   runStatelessThread $ makeAction thr <$> tryIOError getLine >>= repaint ctx
 
-buildWidget ctx@(rs,_,_) wd@(CpuGraph attr colors refresh) = do
+buildWidget ctx@(rs,_,_) wd@(CpuGraph attr colors refresh tscale) = do
   let WidgetAttributes sz pos  _ bg _ _ = attr
       (Size ws hs, Size x0 y0) = (sz, pos)
       readCPU = map read . tail. words . head . lines <$> readFile "/proc/stat"
   cpu <- readCPU
-  let graph = replicate (length cpu) $ replicate ws 0
+  let graph = makeGraph tscale ws (length cpu)
   let colorTable = map toColor colors
 
   runThread (cpu,graph) $ \(cpu',graph')-> do
@@ -424,16 +441,57 @@ buildWidget ctx@(rs,_,_) wd@(CpuGraph attr colors refresh) = do
     let (user:nice:sys:idle:io:_) = zipWith (-) cpu'' cpu'
         (total:points) = reverse $ scanl (+) 0 [sys + io, nice, user, idle]
         sample = map ((`div` (if total == 0 then 1 else total)) . (*hs)) points
-        graph'' = map (\(n,o) -> o++[n]) $ zip sample $ map tail graph'
+        graph'' = updateGraph graph' sample ws
 
     repaint ctx $ \gd ->
       withDrawWidget rs gd attr $ \d -> liftIO $ do
         drawRect (display rs) d bg x0 y0 ws hs
         -- drawSegments (Segment ) 0xFF8080
-        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd) . zip [x0..]) graph'
+        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
+                            . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph''
         mapM_ (drawColorSegment rs) $ zip segments  colorTable
     threadDelay $ round (1000000 * refresh)
     return (cpu'', graph'')
+
+
+buildWidget ctx@(rs,_,_) wd@CpuTop {refreshRate = refresh} = do
+  draw <- makeTextPainter rs wd
+  let loadavg = foldl (\a b -> a++" "++b) "Load avg: " . take 3 . words <$> readFile "/proc/loadavg"
+  let getDt newTs ts = (/1e12) . fromIntegral . fromEnum $ diffUTCTime newTs ts
+  procs <- pickCpuUsage
+  ts <- getCurrentTime
+
+  runThread (procs,ts, []) $ \(procs', ts', top) -> do
+    avg <- loadavg
+    print (avg,top)
+    repaint ctx $ draw (avg:top)
+    threadDelay $ round (1000000 * refresh)
+    procs'' <- pickCpuUsage
+    ts'' <- getCurrentTime
+    let dt = getDt ts'' ts'
+    top <- makeCpuDiff procs'' procs' dt
+    return (procs'', ts'', top)
+
+data Graph = LinearGraph [[Int]] | LogGraph Int [[[Int]]]
+
+makeGraph :: TimeScale -> Int -> Int -> Graph
+makeGraph LinearTime ws l = LinearGraph $ replicate l $ replicate ws 0
+makeGraph (LogTime n) ws l = LogGraph n $ replicate l $ replicate (1 + ws `div` n) []
+
+updateGraph :: Graph -> [Int] -> Int -> Graph
+updateGraph (LinearGraph g) s ws = LinearGraph $ map (\(n,o) -> n : take (ws-1) o) $ zip s g
+updateGraph (LogGraph n g) s ws = LogGraph n $ zipWith updateLayer g s where
+  updateLayer (vv:xs) v
+    | length vv == (n+2) = let (a,b) = splitAt n vv in (v:a):updateLayer xs ((1 + sum b) `div` length b) 
+    | otherwise = (v:vv):xs
+
+exportGraph (LinearGraph g) = g
+exportGraph (LogGraph n g) = map (concatMap (take' n)) g where
+  take' n arr = let (a,b) = splitAt (n-1) arr in a ++ (case b of
+       [] -> []
+       _ -> [(1 + sum b) `div` length b])
+
+
 
 makeSegment y0 height (x,y) = Segment x' y0' x' y1' where
   x' = fi x

@@ -14,6 +14,8 @@ import System.Directory
 import System.IO.Error
 import Text.Printf
 import Utils
+import qualified Data.ByteString as Str
+import qualified Data.ByteString.Char8 as Char8
 
 {-
 0 pid           process id
@@ -59,7 +61,7 @@ makeCpuDiff newCpuInfo cpuInfo sec = do
 
 readFiles [] = return []
 readFiles (pid:pids) = do
-  content <- (Just <$> readFile pid) `catchIOError` \_ -> return Nothing
+  content <- (Just <$> Str.readFile pid) `catchIOError` \_ -> return Nothing
   case content of
     Nothing -> readFiles pids
     Just c -> do
@@ -73,7 +75,7 @@ pickProcValues selector = do
   x <- getDirectoryContents "/proc"
   let pids = map (printf "/proc/%s/stat") $ filter (isDigit . head) x :: [String]
   files <- readFiles pids
-  return $! map (valuePicker selector) files
+  return $! map (valuePicker selector . Char8.unpack) files
 
 memInfo = do
   mem <- pickProcValues memSelector :: IO [(String, (String, Int))]
