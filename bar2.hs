@@ -309,11 +309,11 @@ drawMessage rs attr tattr font d off (Text fg bg msg) = do
        xglyphinfo_x, xglyphinfo_y, xglyphinfo_width, xglyphinfo_xOff]
   let x' = x + case justify of
                   JustifyLeft -> dx
-                  JustifyMiddle -> (ws - twidth) `div` 2
-                  JustifyRight ->  ws - twidth
+                  JustifyMiddle -> (ws - txoff) `div` 2
+                  JustifyRight ->  ws - txoff
   let y' = y + ((hs + dy) `div` 2)
   let (fg', bg') = (fromMaybe wfg fg, fromMaybe wbg bg)
-  liftIO $ print (show msg ++ "  " ++ show x' ++ " " ++ show y' ++ " w:" ++ show twidth)
+  liftIO $ print (show msg ++ "  " ++ show x' ++ " " ++ show y' ++ " w:" ++ show txoff)
   liftIO $ withColor dpy bg' $ \c -> xftDrawRect d c (x + xoff) (y + yoff) ws hs
   liftIO $ withColor dpy fg' $ \c -> xftDrawString d c font (x' + xoff) (y' + yoff) msg
   return $ Size (xoff + txoff) yoff
