@@ -1,10 +1,12 @@
-import Control.Concurrent
+import Control.Concurrent.BoundedChan
+import Control.Concurrent (threadDelay, myThreadId, forkIO, killThread)
 import Control.Monad.Loops
 import Control.Monad.Reader
 import Control.Monad.State
 import Data.Bits
 import Data.IORef
 import Data.List
+import Data.Map ((!))
 import Data.Maybe
 import Data.Time
 import Data.Time.Zones
@@ -22,6 +24,7 @@ import Text.Printf
 import DzenParse
 import Icon
 import Top
+import Utils
 
 barHeight :: Int
 barHeight = 24
@@ -35,21 +38,26 @@ marginBottom = 1
 barBackground :: String
 barBackground = "#BEBEBE"
 
+infoBackground :: String
+infoBackground = "#181838"
+
 tooltipBackground :: String
 --tooltipBackground = "#FFFFC0"
 tooltipBackground = "#505050"
 
 bars :: [Bar]
-bars = [bar1, bar2]
--- bars = [bar1]
+--bars = [bar1, bar2]
+bars = [bar1]
 
 bar1 :: Bar
 bar1 = Bar barHeight {-screen-} 0 GravityBottom [
         clock # TimeFormat "%R" #
             Width 60 # RightPadding 4 #
-            LocalTimeZone # BackgroundColor "#181838" #
+            LocalTimeZone # BackgroundColor infoBackground #
             clockTooltip,
-        cpu # Width 120 #cpuTooltip,
+        cpu # cpuTooltip,
+        mem # memTooltip,
+        net "brkvm" # netTooltip "brkvm",
 
         title # LeftPadding 2 # RightPadding 2 #
                 BackgroundColor barBackground #
@@ -60,7 +68,7 @@ bar2 :: Bar
 bar2 = Bar (barHeight*2) {-screen-} 0 GravityTop [
         clock # TimeFormat "%R" #
             Width 60 # RightPadding 4 #
-            LocalTimeZone # BackgroundColor "#181838" #
+            LocalTimeZone # BackgroundColor infoBackground #
             clockTooltip,
 
         title # LeftPadding 2 # RightPadding 2 #
@@ -82,6 +90,11 @@ clockTooltip = Tooltip (Size 460 (barHeight * 2)) Horizontal [
 cpuTooltip = Tooltip (Size 300 (4*barHeight)) Horizontal [
      tooltipText cpuTop #Height (4*barHeight) #Width 280,
      tooltip cpu #RefreshRate 0.1 # Width 20 #LinearTime
+     ]
+
+memTooltip = cpuTooltip -- TODO
+netTooltip netdev = Tooltip (Size 300 (4*barHeight)) Horizontal [
+     tooltip (net netdev) #RefreshRate 0.1 #LogTime 50 # Width 300
      ]
 
 tooltip w = w #BackgroundColor "#FFFFC0"
@@ -127,6 +140,51 @@ data TimeScale = LinearTime | LogTime Int deriving Show
 
 data Bar = Bar Int ScreenNumber Gravity [Widget] deriving Show
 data Tooltip = Tooltip Size Orientation [Widget] deriving Show
+
+data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_ :: String, tz_ :: ClockTimeZone }
+          | Label   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, label_ ::  String }
+          | Title   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
+          | CpuTop  {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Double}
+          | Latency {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
+          | Frame   {attr_ :: WidgetAttributes, orient_ :: Orientation, children_ :: [Widget]}
+          | CpuGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double, timeScale_ :: TimeScale}
+          | MemGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double, timeScale_ :: TimeScale}
+          | NetGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double, timeScale_ :: TimeScale, netdev_ :: String}
+          deriving Show
+
+defaultAttr :: WidgetAttributes
+defaultAttr = WidgetAttributes (Size 5000 barHeight) 0 (Padding 1 1) infoBackground Nothing Nothing
+
+defaultTAttr :: TextAttributes
+defaultTAttr = TextAttributes "#C7AE86" JustifyMiddle "-*-*-medium-r-normal--15-*-*-*-*-*-iso10646-*" barHeight
+
+clock :: Widget
+clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone
+
+cpu :: Widget
+cpu = CpuGraph defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 1 (LogTime 8) # Width 129
+
+mem :: Widget
+mem = MemGraph defaultAttr ["#00FF00", "#6060FF"] 1 (LogTime 8) # Width 129
+
+net :: String -> Widget
+net netdev = NetGraph defaultAttr ["#6060FF", infoBackground, "#60FF60"] 1 (LogTime 8) netdev # Width 129
+
+label :: Widget
+label = Label defaultAttr defaultTAttr ""
+
+title :: Widget
+title = Title defaultAttr defaultTAttr # Width 4000
+
+latency :: Widget
+latency = Latency defaultAttr defaultTAttr
+
+cpuTop :: Widget
+cpuTop = CpuTop defaultAttr defaultTAttr 3 # JustifyLeft
+
+frame :: Orientation -> [Widget] -> Widget
+frame = Frame (WidgetAttributes (Size 5000 barHeight) 0 (Padding 0 0)
+                               "#181838" Nothing Nothing)
 
 class Apply a where
   apply :: a -> Widget -> Widget
@@ -177,43 +235,6 @@ infixl 9 #
 (#) :: (Apply a) => Widget -> a  -> Widget
 (#) w a = apply a w
 
-data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_ :: String, tz_ :: ClockTimeZone }
-          | Label   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, label_ ::  String }
-          | Title   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
-          | CpuTop  {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Double}
-          | Latency {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
-          | Frame   {attr_ :: WidgetAttributes, orient_ :: Orientation, children_ :: [Widget]}
-          | CpuGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double, timeScale_ :: TimeScale}
-          deriving Show
-
-defaultAttr :: WidgetAttributes
-defaultAttr = WidgetAttributes (Size 5000 barHeight) 0 (Padding 1 1) "#181838" Nothing Nothing
-
-defaultTAttr :: TextAttributes
-defaultTAttr = TextAttributes "#C7AE86" JustifyMiddle "-*-*-medium-r-normal--15-*-*-*-*-*-iso10646-*" barHeight
-
-clock :: Widget
-clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone
-
-cpu :: Widget
-cpu = CpuGraph defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 1 (LogTime 5)
-
-label :: Widget
-label = Label defaultAttr defaultTAttr ""
-
-title :: Widget
-title = Title defaultAttr defaultTAttr # Width 4000
-
-latency :: Widget
-latency = Latency defaultAttr defaultTAttr
-
-cpuTop :: Widget
-cpuTop = CpuTop defaultAttr defaultTAttr 3 # JustifyLeft
-
-frame :: Orientation -> [Widget] -> Widget
-frame = Frame (WidgetAttributes (Size 5000 barHeight) 0 (Padding 0 0)
-                               "#181838" Nothing Nothing)
-
 makeFont :: RenderState -> TextAttributes -> IO XftFont
 makeFont RenderState { display = dpy } (TextAttributes _ _ fontName _) =
   xftFontOpenXlfd dpy (defaultScreenOfDisplay dpy) fontName
@@ -242,7 +263,7 @@ formatClock fmt zoned = do
 type DrawCall a = StateT IconCache IO a
 type DrawCallback = Maybe XftDraw -> DrawCall ()
 type DrawRef = IORef DrawCallback
-type ControlChan = Chan ([Window] -> DrawCallback)
+type ControlChan = BoundedChan ([Window] -> DrawCallback)
 data DrawableWidget = DrawableWidget Widget DrawRef
 data RenderState = RenderState {
   display :: Display,
@@ -275,9 +296,6 @@ type RW a = StateT RWState (ReaderT ROState IO) a
 
 instance Show DrawableWidget where
   show (DrawableWidget x _) = "Drawable " ++ show x
-
-fi :: (Integral a, Num b) => a -> b
-fi = fromIntegral
 
 copyToWindow :: RenderState -> Int -> Int -> Int -> Int -> IO ()
 copyToWindow RenderState {display = dpy, buffer = buf, window = w, gc_ = gc} x y width height =
@@ -312,13 +330,19 @@ getIcon w = do
   return img
 
 withDrawWidget :: RenderState -> Maybe XftDraw -> WidgetAttributes -> (XftDraw -> DrawCall ()) -> DrawCall ()
-withDrawWidget rs globalDraw attr action =
-  case globalDraw of
-    Just d -> action d
-    Nothing -> withDrawState rs $ \d -> do
-        let WidgetAttributes (Size width height) (Size x y) _ _ _ _ = attr
+withDrawWidget rs globalDraw attr action = do
+  let WidgetAttributes (Size ws hs) (Size x y) _ wbg _ _ = attr
+  let clipAndDraw d = do
+        void $ liftIO $ do
+          xftDrawSetClipRectangles d 0 0 [Rectangle (fi x) (fi y) (fi ws) (fi hs)]
+          drawRect (display rs) d wbg x y ws hs
         action d
-        liftIO $ copyToWindow rs (fi x) (fi y) (fi width) (fi height)
+
+  case globalDraw of
+    Just d -> clipAndDraw d
+    Nothing -> withDrawState rs $ \d -> do
+        clipAndDraw d
+        liftIO $ copyToWindow rs (fi x) (fi y) (fi ws) (fi hs)
         liftIO $ sync (display rs) False
 
 
@@ -365,12 +389,7 @@ drawMessages rs attr tattr font d yoff msg = do
 drawStringWidget :: RenderState -> Widget -> XftFont -> [String] -> Maybe XftDraw -> DrawCall ()
 drawStringWidget rs@RenderState { display = dpy } wd font strings globalDraw = do
   let draw = drawMessages rs (attr_ wd) (tattr_ wd) font
-  withDrawWidget rs globalDraw (attr_ wd) $ \d -> do
-    let WidgetAttributes sz pos  _ wbg _ _ = attr_ wd
-    let (Size ws hs, Size x y) = (sz, pos)
-    _ <- liftIO $ xftDrawSetClipRectangles d 0 0 [Rectangle (fi x) (fi y) (fi ws) (fi hs)]
-    liftIO $ drawRect (display rs) d wbg x y ws hs
-    foldM_ (draw d) 0 strings
+  withDrawWidget rs globalDraw (attr_ wd) $ \d -> foldM_ (draw d) 0 strings
 
 makeTextPainter :: RenderState -> Widget -> IO ([String] -> DrawCallback)
 makeTextPainter rs wd = do
@@ -400,7 +419,7 @@ buildWidget (rs,_,ref) wd@Label { label_ = msg } = do
 
 buildWidget ctx@(rs,_,_) wd@Latency {} = do
   draw <- makeTextPainter rs wd
-  backChan <- newChan :: IO (Chan Char)
+  backChan <- newBoundedChan 1 :: IO (BoundedChan Char)
   ts <- getCurrentTime
   runThread ts $ \prev-> do
     ts <- getCurrentTime
@@ -433,7 +452,7 @@ buildWidget ctx@(rs,_,_) wd@Title {} = do
 buildWidget ctx@(rs,_,_) wd@(CpuGraph attr colors refresh tscale) = do
   let WidgetAttributes sz pos  _ bg _ _ = attr
       (Size ws hs, Size x0 y0) = (sz, pos)
-      readCPU = map read . tail. words . head . lines <$> readFile "/proc/stat"
+      readCPU = map read . tail. words . head . lines <$> readFully "/proc/stat"
   cpu <- readCPU
   let graph = makeGraph tscale ws (length cpu)
   let colorTable = map toColor colors
@@ -455,11 +474,66 @@ buildWidget ctx@(rs,_,_) wd@(CpuGraph attr colors refresh tscale) = do
     threadDelay $ round (1000000 * refresh)
     return (cpu'', graph'')
 
+buildWidget ctx@(rs,_,_) wd@(MemGraph attr colors refresh tscale) = do
+  let WidgetAttributes sz pos  _ bg _ _ = attr
+      (Size ws hs, Size x0 y0) = (sz, pos)
+  let graph = makeGraph tscale ws 2
+  let colorTable = map toColor colors
+
+  runThread graph $ \graph' -> do
+    memState <- readBatteryFile "/proc/meminfo"
+
+    let [total,free,cached] = map (read . (memState !)) ["MemTotal", "MemFree", "Cached"]
+        sample = map ((`div` (if total == 0 then 1 else total)) . (*hs)) [total - free, total - free - cached]
+        graph'' = updateGraph graph' sample ws
+
+    repaint ctx $ \gd ->
+      withDrawWidget rs gd attr $ \d -> liftIO $ do
+        drawRect (display rs) d bg x0 y0 ws hs
+        -- drawSegments (Segment ) 0xFF8080
+        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
+                            . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph''
+        mapM_ (drawColorSegment rs) $ zip segments  colorTable
+    threadDelay $ round (1000000 * refresh)
+    return graph''
+
+buildWidget ctx@(rs,_,_) wd@(NetGraph attr colors refresh tscale netdev) = do
+  let WidgetAttributes sz pos  _ bg _ _ = attr
+      (Size ws hs, Size x0 y0) = (sz, pos)
+  net <- readNetFile "/proc/net/dev"
+  ts <- getCurrentTime
+  let graph = makeGraph tscale ws 3
+  let colorTable = map toColor colors
+
+  runThread (ts, net,graph) $ \(ts', net',graph')-> do
+    threadDelay $ round (1000000 * refresh)
+    net'' <- readNetFile "/proc/net/dev"
+    ts'' <- getCurrentTime
+    let dt = getDt ts'' ts'
+        netDelta = zipWith (-) (net'' ! netdev) (net' ! netdev)
+        f x = log (x + 1)
+        f2 x = f x * f x * f x
+        maxF = f2 $ 100000000 * dt
+        [inbound, outbound] = map f2 . getNetBytes $ netDelta
+        values@(total:_) = reverse . tail . scanl (+) 0 . map (max 0 . truncate) $
+                           [inbound, maxF - inbound - outbound, outbound] :: [Int]
+        sample = map ((`div` (if total == 0 then 1 else total)) . (*hs)) values
+        graph'' = updateGraph graph' sample ws
+    liftIO $ print values
+
+    repaint ctx $ \gd ->
+      withDrawWidget rs gd attr $ \d -> liftIO $ do
+        drawRect (display rs) d bg x0 y0 ws hs
+        -- drawSegments (Segment ) 0xFF8080
+        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
+                            . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph''
+        mapM_ (drawColorSegment rs) $ zip segments  colorTable
+    return (ts'', net'', graph'')
+
 
 buildWidget ctx@(rs,_,_) wd@CpuTop {refreshRate = refresh} = do
   draw <- makeTextPainter rs wd
-  let loadavg = foldl (\a b -> a++" "++b) "Load avg: " . take 3 . words <$> readFile "/proc/loadavg"
-  let getDt newTs ts = (/1e12) . fromIntegral . fromEnum $ diffUTCTime newTs ts
+  let loadavg = foldl (\a b -> a++" "++b) "Load avg: " . take 3 . words <$> readFully "/proc/loadavg"
   procs <- pickCpuUsage
   ts <- getCurrentTime
 
@@ -483,6 +557,7 @@ makeGraph (LogTime n) ws l = LogGraph n $ replicate l $ replicate (1 + ws `div` 
 updateGraph :: Graph -> [Int] -> Int -> Graph
 updateGraph (LinearGraph g) s ws = LinearGraph $ map (\(n,o) -> n : take (ws-1) o) $ zip s g
 updateGraph (LogGraph n g) s ws = LogGraph n $ zipWith updateLayer g s where
+  updateLayer [] _ = []
   updateLayer (vv:xs) v
     | length vv == (n+2) = let (a,b) = splitAt n vv in (v:a):updateLayer xs ((1 + sum b) `div` length b) 
     | otherwise = (v:vv):xs
@@ -493,12 +568,19 @@ exportGraph (LogGraph n g) = map (concatMap (take' n)) g where
        [] -> []
        _ -> [(1 + sum b) `div` length b])
 
+readBatteryFile = readKeyValueFile $ head . words
+readNetFile = readKeyValueFile $ map read . words
+getDt newTs ts = (/1e12) . fromIntegral . fromEnum $ diffUTCTime newTs ts
 
+getNetBytes input = [inbound, outbound] where
+  atIndex idx = fi $ input !! idx
+  inbound = atIndex 0
+  outbound = atIndex 8
 
 makeSegment y0 height (x,y) = Segment x' y0' x' y1' where
   x' = fi x
-  y0' = fi $ height - 1 + y0
-  y1' = fi $ height - 1 + y0 - fi y
+  y0' = fi $ height + y0
+  y1' = fi $ height + y0 - fi y
 
 drawColorSegment rs (segments, color) = do
   let RenderState {display = dpy, buffer = w, gc_ = gc} = rs
@@ -569,16 +651,16 @@ windowMapAndSelectInput dpy w mask = do
 createTooltip :: RenderState -> Widget -> Tooltip -> RW ()
 createTooltip parent_rs pwd tip = do
   let dpy = display parent_rs
-  let Tooltip sz@(Size width height) orien widgets = tip
+  let Tooltip tsz@(Size width height) orien widgets = tip
 
   parent <- liftIO $ getWindowAttributes dpy (window parent_rs)
-  let WidgetAttributes ws pos _ _ _ _ = attr_ pwd
+  let WidgetAttributes sz pos _ _ _ _ = attr_ pwd
   let wpos = Size (fi $ wa_x parent) (fi $ wa_y parent)
   let place = if y_ wpos == 0
-                 then wpos + pos + ws * dir Vertical - half ws * dir Horizontal - Size 0 2
-                 else wpos + pos - half ws * dir Horizontal - sz * dir Vertical + Size 0 2
+                 then wpos + pos + sz * dir Vertical - half (tsz-sz) * dir Horizontal - Size 0 0
+                 else wpos + pos - half (tsz-sz) * dir Horizontal - tsz * dir Vertical + Size 0 0
   let screenWidth = fi $ displayWidth dpy (screenNum parent_rs)
-  let x = max 2 $ min (x_ place) (screenWidth - width - 2)
+  let x = max 0 $ min (x_ place) (screenWidth - width)
 
   liftIO $ print $ "Enter! Creating Window " ++ show place ++ " wpos " ++ show wpos
 
@@ -637,7 +719,6 @@ updateTooltip ww next = do
   prev <- mouse_ <$> get
   get >>= \s -> put s { mouse_ = next }
 
-  liftIO $ printf "%s ->%s\n" (show prev) (show next)
   let insideWA wa p = fromMaybe False (p >>= inbounds wa)
   let inside wd = insideWA (attr_ wd)
 
@@ -686,11 +767,26 @@ handleEvent event@_ =
 eventLoop :: RW ()
 eventLoop = forever $ do
   dpy <- display . rs_ . head <$> reader windows
-  event <- liftIO $ allocaXEvent $ \ev -> do
-    liftIO $ nextEvent dpy ev
-    getEvent ev
+  ch <- reader controlChan
+  p <- liftIO $ pending dpy
 
-  handleEvent event
+  case p of
+    0 -> do
+      v <- liftIO $ tryReadChan ch
+      case v of
+        Nothing -> do
+          liftIO $ waitForEvent dpy 1000000000
+          return ()
+        Just action -> do
+            allWinIds <- map (window . rs_) <$> allWindows
+            liftIconCache $ action allWinIds Nothing
+            return ()
+
+    _ -> do
+      event <- liftIO $ allocaXEvent $ \ev -> do
+        liftIO $ nextEvent dpy ev
+        getEvent ev
+      handleEvent event
 
 sendClientEvent :: Display -> Atom -> Window -> Atom -> IO ()
 sendClientEvent d a w val = do
@@ -699,17 +795,6 @@ sendClientEvent d a w val = do
          setClientMessageEvent e w a 32 val currentTime
          sendEvent d w False structureNotifyMask e
     sync d False
-
-copyChanToX :: Chan a -> Window -> IO ()
-copyChanToX chan w = do
-  chanCopy <- dupChan chan
-  d <- openDisplay ""
-  a <- internAtom d "BAR_UPDATE" False
-  forever $ do
-     _ <- readChan chanCopy
-     sendClientEvent d a w 0 `catchIOError`  \x -> do
-       print $ "Exception caught: " ++ show x
-       sync d False
 
 makeBar :: Display -> ControlChan -> Bar -> StateT Bool IO WindowState
 makeBar dpy controlCh (Bar height scr gravity wds) = do
@@ -739,7 +824,6 @@ makeBar dpy controlCh (Bar height scr gravity wds) = do
     let rs = RenderState { display = dpy, window = w, buffer = buf, gc_ = gc,
                                    windowWidth = width, windowHeight = height,
                                    screenNum = scr}
-    when cc $ void $ forkOS $ copyChanToX controlCh w
 
     strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
     changeProperty32 dpy w strutPartial cARDINAL propModeReplace strutValues
@@ -764,7 +848,7 @@ main :: IO ()
 main = do
   xSetErrorHandler
   dpy <- openDisplay ""
-  controlCh <- newChan :: IO ControlChan
+  controlCh <- newBoundedChan 5 :: IO ControlChan
 
   wins <- evalStateT (mapM (makeBar dpy controlCh) bars) True
   icons <- makeIconCache dpy

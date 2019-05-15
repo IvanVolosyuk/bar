@@ -9,11 +9,14 @@ module Utils (
   loop,
   bytes,
   perSec,
-  readKeyValueFile
+  readKeyValueFile,
+  readFully
   ) where
 
 import Text.Printf
 import qualified Data.Map as M
+import qualified Data.ByteString as Str
+import qualified Data.ByteString.Char8 as Char8
 
 pair op (a,b) = op a b
 join sep [] = ""
@@ -41,6 +44,9 @@ loop f input = do
   output <- f input
   loop f output
 
+readFully :: FilePath -> IO String
+readFully f = Char8.unpack <$> Str.readFile f
+
 bytes :: Int -> String
 bytes b 
   | b < 1024 = printf "%d bytes" b
@@ -49,7 +55,7 @@ bytes b
   | b >= (10 * 1024 * 1024) = printf "%d MB" (b `div` (1024 * 1024)) where
     bf = fromIntegral b :: Double
 
-readKeyValueFile pp filename = makeMap <$> readFile filename where
+readKeyValueFile pp filename = makeMap <$> readFully filename where
   makeMap l = M.fromList $ map parseLine . lines $ l
   parseLine l = (strip k, pp v) where
      (k,v) = split1 ':' l
