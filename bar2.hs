@@ -1,5 +1,4 @@
-import Control.Concurrent.BoundedChan
-import Control.Concurrent (threadDelay, myThreadId, forkIO, killThread)
+import Control.Concurrent
 import Control.Monad.Loops
 import Control.Monad.Reader
 import Control.Monad.State
@@ -57,7 +56,7 @@ bar1 = Bar barHeight {-screen-} 0 GravityBottom [
             clockTooltip,
         cpu # cpuTooltip,
         mem # memTooltip,
-        net "brkvm" # netTooltip "brkvm",
+        net "wlp2s0" # netTooltip "wlp2s0",
 
         title # LeftPadding 2 # RightPadding 2 #
                 BackgroundColor barBackground #
@@ -263,7 +262,7 @@ formatClock fmt zoned = do
 type DrawCall a = StateT IconCache IO a
 type DrawCallback = Maybe XftDraw -> DrawCall ()
 type DrawRef = IORef DrawCallback
-type ControlChan = BoundedChan ([Window] -> DrawCallback)
+type ControlChan = Chan ([Window] -> DrawCallback)
 data DrawableWidget = DrawableWidget Widget DrawRef
 data RenderState = RenderState {
   display :: Display,
@@ -419,7 +418,7 @@ buildWidget (rs,_,ref) wd@Label { label_ = msg } = do
 
 buildWidget ctx@(rs,_,_) wd@Latency {} = do
   draw <- makeTextPainter rs wd
-  backChan <- newBoundedChan 1 :: IO (BoundedChan Char)
+  backChan <- newChan :: IO (Chan Char)
   ts <- getCurrentTime
   runThread ts $ \prev-> do
     ts <- getCurrentTime
@@ -449,87 +448,38 @@ buildWidget ctx@(rs,_,_) wd@Title {} = do
         Right msg -> draw [msg]
   runStatelessThread $ makeAction thr <$> tryIOError getLine >>= repaint ctx
 
-buildWidget ctx@(rs,_,_) wd@(CpuGraph attr colors refresh tscale) = do
-  let WidgetAttributes sz pos  _ bg _ _ = attr
-      (Size ws hs, Size x0 y0) = (sz, pos)
-      readCPU = map read . tail. words . head . lines <$> readFully "/proc/stat"
+buildWidget ctx wd@CpuGraph {} = do
+  let readCPU = map read . tail. words . head . lines <$> readFully "/proc/stat"
   cpu <- readCPU
-  let graph = makeGraph tscale ws (length cpu)
-  let colorTable = map toColor colors
+  let m cpu' = Module $ \_ -> do
+      cpu'' <- readCPU
+      let (user:nice:sys:idle:io:_) = zipWith (-) cpu'' cpu'
+      return ([sys + io, nice, user, idle], m cpu'')
+  buildGraphWidget ctx wd 3 (repeat 1.0) (m cpu)
 
-  runThread (cpu,graph) $ \(cpu',graph')-> do
-    cpu'' <- readCPU
-    let (user:nice:sys:idle:io:_) = zipWith (-) cpu'' cpu'
-        (total:points) = reverse $ scanl (+) 0 [sys + io, nice, user, idle]
-        sample = map ((`div` (if total == 0 then 1 else total)) . (*hs)) points
-        graph'' = updateGraph graph' sample ws
+buildWidget ctx wd@MemGraph {} = do
+  let m = Module $ \_ -> do
+      mem <- readBatteryFile "/proc/meminfo"
+      let [total,free,cached] = map (read . (mem !)) ["MemTotal", "MemFree", "Cached"]
+      return ([total - free - cached, total - free, total], m)
+  buildGraphWidget ctx wd 2 (0.0 : repeat 1.0) m
 
-    repaint ctx $ \gd ->
-      withDrawWidget rs gd attr $ \d -> liftIO $ do
-        drawRect (display rs) d bg x0 y0 ws hs
-        -- drawSegments (Segment ) 0xFF8080
-        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
-                            . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph''
-        mapM_ (drawColorSegment rs) $ zip segments  colorTable
-    threadDelay $ round (1000000 * refresh)
-    return (cpu'', graph'')
-
-buildWidget ctx@(rs,_,_) wd@(MemGraph attr colors refresh tscale) = do
-  let WidgetAttributes sz pos  _ bg _ _ = attr
-      (Size ws hs, Size x0 y0) = (sz, pos)
-  let graph = makeGraph tscale ws 2
-  let colorTable = map toColor colors
-
-  runThread graph $ \graph' -> do
-    memState <- readBatteryFile "/proc/meminfo"
-
-    let [total,free,cached] = map (read . (memState !)) ["MemTotal", "MemFree", "Cached"]
-        sample = map ((`div` (if total == 0 then 1 else total)) . (*hs)) [total - free, total - free - cached]
-        graph'' = updateGraph graph' sample ws
-
-    repaint ctx $ \gd ->
-      withDrawWidget rs gd attr $ \d -> liftIO $ do
-        drawRect (display rs) d bg x0 y0 ws hs
-        -- drawSegments (Segment ) 0xFF8080
-        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
-                            . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph''
-        mapM_ (drawColorSegment rs) $ zip segments  colorTable
-    threadDelay $ round (1000000 * refresh)
-    return graph''
-
-buildWidget ctx@(rs,_,_) wd@(NetGraph attr colors refresh tscale netdev) = do
-  let WidgetAttributes sz pos  _ bg _ _ = attr
-      (Size ws hs, Size x0 y0) = (sz, pos)
+buildWidget ctx wd@NetGraph {netdev_ = netdev} = do
   net <- readNetFile "/proc/net/dev"
   ts <- getCurrentTime
-  let graph = makeGraph tscale ws 3
-  let colorTable = map toColor colors
-
-  runThread (ts, net,graph) $ \(ts', net',graph')-> do
-    threadDelay $ round (1000000 * refresh)
-    net'' <- readNetFile "/proc/net/dev"
-    ts'' <- getCurrentTime
-    let dt = getDt ts'' ts'
-        netDelta = zipWith (-) (net'' ! netdev) (net' ! netdev)
-        f x = log (x + 1)
-        f2 x = f x * f x * f x
-        maxF = f2 $ 100000000 * dt
-        [inbound, outbound] = map f2 . getNetBytes $ netDelta
-        values@(total:_) = reverse . tail . scanl (+) 0 . map (max 0 . truncate) $
-                           [inbound, maxF - inbound - outbound, outbound] :: [Int]
-        sample = map ((`div` (if total == 0 then 1 else total)) . (*hs)) values
-        graph'' = updateGraph graph' sample ws
-    liftIO $ print values
-
-    repaint ctx $ \gd ->
-      withDrawWidget rs gd attr $ \d -> liftIO $ do
-        drawRect (display rs) d bg x0 y0 ws hs
-        -- drawSegments (Segment ) 0xFF8080
-        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
-                            . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph''
-        mapM_ (drawColorSegment rs) $ zip segments  colorTable
-    return (ts'', net'', graph'')
-
+  
+  let m net' ts' = Module $ \_ -> do
+      net'' <- readNetFile "/proc/net/dev"
+      ts'' <- getCurrentTime
+      let dt = getDt ts'' ts'
+          netDelta = zipWith (-) (net'' ! netdev) (net' ! netdev)
+          f x = log (x + 1)
+          f2 x = f x * f x * f x
+          maxF = f2 $ 100000000 * dt
+          [inbound, outbound] = map f2 . getNetBytes $ netDelta
+          out = map (truncate . max 0) [inbound, maxF - inbound - outbound, outbound, 0]
+      return (out, m net'' ts'')
+  buildGraphWidget ctx wd 3 (repeat 1.0) (m net ts)
 
 buildWidget ctx@(rs,_,_) wd@CpuTop {refreshRate = refresh} = do
   draw <- makeTextPainter rs wd
@@ -547,6 +497,49 @@ buildWidget ctx@(rs,_,_) wd@CpuTop {refreshRate = refresh} = do
     let dt = getDt ts'' ts'
     top <- makeCpuDiff procs'' procs' dt
     return (procs'', ts'', top)
+
+
+newtype Module m a b =
+      Module (a -> m (b, Module m a b))
+
+instance (Monad m) => Functor (Module m a) where
+  fmap f (Module mf) =
+    Module $ \inp -> do
+        (b, m') <- mf inp
+        return (f b, fmap f m')
+
+instance (Monad m) => Applicative (Module m a) where
+  pure a = Module $ \_ -> return (a, pure a)
+  Module f1 <*> Module f2 = Module $ \inp -> do
+    (f, m1') <- f1 inp
+    (x, m2') <- f2 inp
+    return (f x, m1' <*> m2')
+
+runModule m inp = let Module f = m in f inp
+
+buildGraphWidget ctx@(rs,_,_) wd nlayers intervals sampler = do
+  let (attr, colors, refresh, tscale) = (attr_ wd, colorTable wd, refreshRate wd, timeScale_ wd)
+      WidgetAttributes sz pos  _ bg _ _ = attr
+      (Size ws hs, Size x0 y0) = (sz, pos)
+  let graph = makeGraph tscale ws nlayers
+  let colorTable = map toColor colors
+  let scale (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*hs)) vals
+  let samp = fmap (scale . reverse . tail . scanl (+) 0) sampler
+
+  runThread (intervals, samp, graph) $ \(ivals, samp', graph')-> do
+    threadDelay $ round (1000000 * refresh * head ivals)
+    (sample, samp'') <- runModule samp' ()
+    let graph'' = updateGraph graph' sample ws
+    --liftIO $ print sample
+
+    repaint ctx $ \gd ->
+      withDrawWidget rs gd attr $ \d -> liftIO $ do
+        drawRect (display rs) d bg x0 y0 ws hs
+        -- drawSegments (Segment ) 0xFF8080
+        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
+                            . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph''
+        mapM_ (drawColorSegment rs) $ zip segments  colorTable
+    return (tail ivals, samp'', graph'')
 
 data Graph = LinearGraph [[Int]] | LogGraph Int [[[Int]]]
 
@@ -566,7 +559,7 @@ exportGraph (LinearGraph g) = g
 exportGraph (LogGraph n g) = map (concatMap (take' n)) g where
   take' n arr = let (a,b) = splitAt (n-1) arr in a ++ (case b of
        [] -> []
-       _ -> [(1 + sum b) `div` length b])
+       _ -> [(sum b + length b - 1) `div` length b])
 
 readBatteryFile = readKeyValueFile $ head . words
 readNetFile = readKeyValueFile $ map read . words
@@ -768,25 +761,10 @@ eventLoop :: RW ()
 eventLoop = forever $ do
   dpy <- display . rs_ . head <$> reader windows
   ch <- reader controlChan
-  p <- liftIO $ pending dpy
-
-  case p of
-    0 -> do
-      v <- liftIO $ tryReadChan ch
-      case v of
-        Nothing -> do
-          liftIO $ waitForEvent dpy 1000000000
-          return ()
-        Just action -> do
-            allWinIds <- map (window . rs_) <$> allWindows
-            liftIconCache $ action allWinIds Nothing
-            return ()
-
-    _ -> do
-      event <- liftIO $ allocaXEvent $ \ev -> do
-        liftIO $ nextEvent dpy ev
-        getEvent ev
-      handleEvent event
+  event <- liftIO $ allocaXEvent $ \ev -> do
+    liftIO $ nextEvent dpy ev
+    getEvent ev
+  handleEvent event
 
 sendClientEvent :: Display -> Atom -> Window -> Atom -> IO ()
 sendClientEvent d a w val = do
@@ -795,6 +773,17 @@ sendClientEvent d a w val = do
          setClientMessageEvent e w a 32 val currentTime
          sendEvent d w False structureNotifyMask e
     sync d False
+
+copyChanToX :: Chan a -> Window -> IO ()
+copyChanToX chan w = do
+  chanCopy <- dupChan chan
+  d <- openDisplay ""
+  a <- internAtom d "BAR_UPDATE" False
+  forever $ do
+     _ <- readChan chanCopy
+     sendClientEvent d a w 0 `catchIOError`  \x -> do
+       print $ "Exception caught: " ++ show x
+       sync d False
 
 makeBar :: Display -> ControlChan -> Bar -> StateT Bool IO WindowState
 makeBar dpy controlCh (Bar height scr gravity wds) = do
@@ -825,6 +814,8 @@ makeBar dpy controlCh (Bar height scr gravity wds) = do
                                    windowWidth = width, windowHeight = height,
                                    screenNum = scr}
 
+    when cc $ void $ forkOS $ copyChanToX controlCh w
+
     strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
     changeProperty32 dpy w strutPartial cARDINAL propModeReplace strutValues
     strut <- internAtom dpy "_NET_WM_STRUT" False
@@ -848,7 +839,7 @@ main :: IO ()
 main = do
   xSetErrorHandler
   dpy <- openDisplay ""
-  controlCh <- newBoundedChan 5 :: IO ControlChan
+  controlCh <- newChan :: IO ControlChan
 
   wins <- evalStateT (mapM (makeBar dpy controlCh) bars) True
   icons <- makeIconCache dpy
