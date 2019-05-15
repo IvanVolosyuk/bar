@@ -211,7 +211,7 @@ handleMessage gState ClientMessageEvent {ev_window = w, ev_data = widgetId:_} = 
          let windowWidgetMap' = M.insert widgetId widget windowWidgetMap
          let widgetsMap' = M.insert w windowWidgetMap' widgetsMap
          return . Update $ gState { widgetsById = widgetsMap' }
-  
+
 handleMessage gState ButtonEvent {ev_x = pos, ev_window = ww} = do
   let widgetsMap = widgetsById gState
   case M.lookup ww widgetsMap of
@@ -478,7 +478,7 @@ zThreadWithIntervals firstIntervals run makeState global@(config, rs, wrs, ch) l
   time <- getCurrentTime
   state <- makeState >>= \x -> return $! x
   let intervals = firstIntervals ++ repeat (refreshRate config)
-  
+
   loop intervals time state where
     loop (interval:intervals) time state = do
       threadDelay (truncate $ 1000000 * interval)
@@ -624,7 +624,7 @@ zMultilineTextDisplayFilter global@(config, rs,wrs, ch) z = do
       draw' val@(s, strings) = do
         zOnDraw z val
         glyphInfo <- xftTextExtents (getDisplay rs) font "Az^.#"
-        
+
         --print msg
         withDraw rs $ \d -> withColor (textColor config) rs $ drawStrings strings glyphInfo d
       drawStrings strings glyphInfo d c = drawOne 0 strings where
@@ -701,7 +701,7 @@ drawDzenXft font iconCache input rs wConf = do
     draw pos (Text fg bg msg : xs) d = do
       let bg' = fromMaybe backgroundColorString bg
           fg' = fromMaybe foregroundColorString fg
-      
+
       glyphInfo <- xftTextExtents dpy font msg
       let [off, dx, dy] = map ($ glyphInfo) [xglyphinfo_xOff, xglyphinfo_x, xglyphinfo_y]
       withColor bg' rs $ \c -> xftDrawRect d c pos 0 off barHeight

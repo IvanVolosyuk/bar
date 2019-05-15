@@ -466,20 +466,19 @@ buildWidget ctx wd@MemGraph {} = do
 
 buildWidget ctx wd@NetGraph {netdev_ = netdev} = do
   net <- readNetFile "/proc/net/dev"
-  ts <- getCurrentTime
-  
-  let m net' ts' = Module $ \_ -> do
+  dtime <- deltaTime
+
+  let m net' dtime' = Module $ \_ -> do
       net'' <- readNetFile "/proc/net/dev"
-      ts'' <- getCurrentTime
-      let dt = getDt ts'' ts'
-          netDelta = zipWith (-) (net'' ! netdev) (net' ! netdev)
+      (dt, dtime'') <- runModule dtime' ()
+      let netDelta = zipWith (-) (net'' ! netdev) (net' ! netdev)
           f x = log (x + 1)
           f2 x = f x * f x * f x
           maxF = f2 $ 100000000 * dt
           [inbound, outbound] = map f2 . getNetBytes $ netDelta
           out = map (truncate . max 0) [inbound, maxF - inbound - outbound, outbound, 0]
-      return (out, m net'' ts'')
-  buildGraphWidget ctx wd 3 (repeat 1.0) (m net ts)
+      return (out, m net'' dtime'')
+  buildGraphWidget ctx wd 3 (repeat 1.0) (m net dtime)
 
 buildWidget ctx@(rs,_,_) wd@CpuTop {refreshRate = refresh} = do
   draw <- makeTextPainter rs wd
@@ -508,6 +507,13 @@ instance (Monad m) => Functor (Module m a) where
         (b, m') <- mf inp
         return (f b, fmap f m')
 
+deltaTime = do
+  ts <- getCurrentTime
+  let m ts' = Module $ \_ -> do
+      ts'' <- getCurrentTime
+      return (getDt ts'' ts', m ts'')
+  return $ m ts
+
 instance (Monad m) => Applicative (Module m a) where
   pure a = Module $ \_ -> return (a, pure a)
   Module f1 <*> Module f2 = Module $ \inp -> do
@@ -515,9 +521,25 @@ instance (Monad m) => Applicative (Module m a) where
     (x, m2') <- f2 inp
     return (f x, m1' <*> m2')
 
+pipeModules :: (Monad m) => Module m a b -> Module m b c -> Module m a c
+pipeModules (Module m1) (Module m2) = Module $ \inp -> do
+    (v1, m1') <- m1 inp
+    (v2, m2') <- m2 v1
+    return (v2, pipeModules m1' m2')
+
+{-
+instance (Monad m) => Monad (Module m a) where
+  (>>=) (Module f) mf = Module $ \inp -> do
+      (v, m1') <- f inp
+      let Module m2 = mf v
+      (v2, m2') <- m2 v
+      return (v2, pipeModules m1' m2')
+-}
+
+
 runModule m inp = let Module f = m in f inp
 
-buildGraphWidget ctx@(rs,_,_) wd nlayers intervals sampler = do
+buildGraphWidget ctx@(rs,_,ref) wd nlayers intervals sampler = do
   let (attr, colors, refresh, tscale) = (attr_ wd, colorTable wd, refreshRate wd, timeScale_ wd)
       WidgetAttributes sz pos  _ bg _ _ = attr
       (Size ws hs, Size x0 y0) = (sz, pos)
@@ -525,20 +547,19 @@ buildGraphWidget ctx@(rs,_,_) wd nlayers intervals sampler = do
   let colorTable = map toColor colors
   let scale (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*hs)) vals
   let samp = fmap (scale . reverse . tail . scanl (+) 0) sampler
+  let draw graph gd = withDrawWidget rs gd attr $ \d -> liftIO $ do
+        drawRect (display rs) d bg x0 y0 ws hs
+        -- drawSegments (Segment ) 0xFF8080
+        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
+                            . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph
+        mapM_ (drawColorSegment rs) $ zip segments colorTable
+  writeIORef ref $ draw graph
 
   runThread (intervals, samp, graph) $ \(ivals, samp', graph')-> do
     threadDelay $ round (1000000 * refresh * head ivals)
     (sample, samp'') <- runModule samp' ()
     let graph'' = updateGraph graph' sample ws
-    --liftIO $ print sample
-
-    repaint ctx $ \gd ->
-      withDrawWidget rs gd attr $ \d -> liftIO $ do
-        drawRect (display rs) d bg x0 y0 ws hs
-        -- drawSegments (Segment ) 0xFF8080
-        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
-                            . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph''
-        mapM_ (drawColorSegment rs) $ zip segments  colorTable
+    repaint ctx $ draw graph''
     return (tail ivals, samp'', graph'')
 
 data Graph = LinearGraph [[Int]] | LogGraph Int [[[Int]]]
@@ -552,7 +573,7 @@ updateGraph (LinearGraph g) s ws = LinearGraph $ map (\(n,o) -> n : take (ws-1) 
 updateGraph (LogGraph n g) s ws = LogGraph n $ zipWith updateLayer g s where
   updateLayer [] _ = []
   updateLayer (vv:xs) v
-    | length vv == (n+2) = let (a,b) = splitAt n vv in (v:a):updateLayer xs ((1 + sum b) `div` length b) 
+    | length vv == (n+2) = let (a,b) = splitAt n vv in (v:a):updateLayer xs ((1 + sum b) `div` length b)
     | otherwise = (v:vv):xs
 
 exportGraph (LinearGraph g) = g
@@ -643,6 +664,7 @@ windowMapAndSelectInput dpy w mask = do
 
 createTooltip :: RenderState -> Widget -> Tooltip -> RW ()
 createTooltip parent_rs pwd tip = do
+  deleteTooltip
   let dpy = display parent_rs
   let Tooltip tsz@(Size width height) orien widgets = tip
 

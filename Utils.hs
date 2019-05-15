@@ -48,7 +48,7 @@ readFully :: FilePath -> IO String
 readFully f = Char8.unpack <$> Str.readFile f
 
 bytes :: Int -> String
-bytes b 
+bytes b
   | b < 1024 = printf "%d bytes" b
   | b < (1024 * 1024) = printf "%d KiB" (b `div` 1024)
   | b < (10 * 1024 * 1024) = printf "%.1f MB" (bf / (1024 * 1024))
