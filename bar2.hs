@@ -20,6 +20,8 @@ import Numeric
 import System.IO.Error
 import Text.Printf
 
+import qualified Data.Map as M
+
 import DzenParse
 import Icon
 import Top
@@ -41,8 +43,7 @@ infoBackground :: String
 infoBackground = "#181838"
 
 tooltipBackground :: String
---tooltipBackground = "#FFFFC0"
-tooltipBackground = "#505050"
+tooltipBackground = "#FFFFC0"
 
 bars :: [Bar]
 --bars = [bar1, bar2]
@@ -56,7 +57,7 @@ bar1 = Bar barHeight {-screen-} 0 GravityBottom [
             clockTooltip,
         cpu # cpuTooltip,
         mem # memTooltip,
-        net "wlp2s0" # netTooltip "wlp2s0",
+        net "brkvm",
 
         title # LeftPadding 2 # RightPadding 2 #
                 BackgroundColor barBackground #
@@ -86,14 +87,19 @@ clockTooltip = Tooltip (Size 460 (barHeight * 2)) Horizontal [
                        ]
  ]
 
-cpuTooltip = Tooltip (Size 300 (4*barHeight)) Horizontal [
-     tooltipText cpuTop #Height (4*barHeight) #Width 280,
+cpuTooltip = Tooltip (Size 300 (6*barHeight)) Horizontal [
+     tooltipText cpuTop #Width 280,
      tooltip cpu #RefreshRate 0.1 # Width 20 #LinearTime
      ]
 
-memTooltip = cpuTooltip -- TODO
-netTooltip netdev = Tooltip (Size 300 (4*barHeight)) Horizontal [
-     tooltip (net netdev) #RefreshRate 0.1 #LogTime 50 # Width 300
+memTooltip = Tooltip (Size 450 (6*barHeight)) Horizontal [
+     tooltipText memstatus #Width 430 #LeftPadding 5,
+     tooltip mem #RefreshRate 0.1 # Width 20 #LinearTime
+     ]
+
+netTooltip netdev = Tooltip (Size 400 (2*barHeight)) Horizontal [
+     tooltipText (netstatus netdev) #RefreshRate 3 # Width 380 #JustifyLeft #LeftPadding 10,
+     tooltip (tooltipNet netdev) #RefreshRate 0.1 #LinearTime # Width 20
      ]
 
 tooltip w = w #BackgroundColor "#FFFFC0"
@@ -104,6 +110,7 @@ tooltipText w = tooltip w  #TextColor "#000000"
 
 tooltipClock = tooltipText clock #TimeFormat "%a, %e %b %Y - %X"
 tooltipLabel = tooltipText label
+tooltipNet netdev = NetGraph defaultAttr ["#6060FF", tooltipBackground, "#60FF60"] 1 (LogTime 8) netdev # Width 129
 
 data Attribute = Width Int | Height Int | LeftPadding Int | RightPadding Int
                | TopPadding Int | BottomPadding Int
@@ -144,6 +151,8 @@ data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_
           | Label   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, label_ ::  String }
           | Title   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
           | CpuTop  {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Double}
+          | NetStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Double, netdev_ :: String}
+          | MemStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Double}
           | Latency {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
           | Frame   {attr_ :: WidgetAttributes, orient_ :: Orientation, children_ :: [Widget]}
           | CpuGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double, timeScale_ :: TimeScale}
@@ -167,7 +176,13 @@ mem :: Widget
 mem = MemGraph defaultAttr ["#00FF00", "#6060FF"] 1 (LogTime 8) # Width 129
 
 net :: String -> Widget
-net netdev = NetGraph defaultAttr ["#6060FF", infoBackground, "#60FF60"] 1 (LogTime 8) netdev # Width 129
+net netdev = NetGraph defaultAttr ["#6060FF", infoBackground, "#60FF60"] 1 (LogTime 8) netdev # Width 129 #netTooltip netdev
+
+netstatus :: String -> Widget
+netstatus = NetStatus defaultAttr defaultTAttr 1
+
+memstatus :: Widget
+memstatus = MemStatus defaultAttr defaultTAttr 1 #JustifyLeft
 
 label :: Widget
 label = Label defaultAttr defaultTAttr ""
@@ -465,20 +480,17 @@ buildWidget ctx wd@MemGraph {} = do
   buildGraphWidget ctx wd 2 (0.0 : repeat 1.0) m
 
 buildWidget ctx wd@NetGraph {netdev_ = netdev} = do
-  net <- readNetFile "/proc/net/dev"
-  dtime <- deltaTime
+  let f x = log (x + 1)
+      f2 x = f x * f x * f x
+  net <- fmap (map f2) <$> netState netdev
+  maxspeed <- fmap (f2 . (*100000000)) <$> deltaTime
 
-  let m net' dtime' = Module $ \_ -> do
-      net'' <- readNetFile "/proc/net/dev"
-      (dt, dtime'') <- runModule dtime' ()
-      let netDelta = zipWith (-) (net'' ! netdev) (net' ! netdev)
-          f x = log (x + 1)
-          f2 x = f x * f x * f x
-          maxF = f2 $ 100000000 * dt
-          [inbound, outbound] = map f2 . getNetBytes $ netDelta
-          out = map (truncate . max 0) [inbound, maxF - inbound - outbound, outbound, 0]
-      return (out, m net'' dtime'')
-  buildGraphWidget ctx wd 3 (repeat 1.0) (m net dtime)
+  let m net' maxspeed' = Module $ \_ -> do
+      ([inbound, outbound], net'') <- runModule net' ()
+      (maxs, maxspeed'') <- runModule maxspeed' ()
+      let out = map (truncate . max 0) [inbound, maxs - inbound - outbound, outbound, 0]
+      return (out, m net'' maxspeed'')
+  buildGraphWidget ctx wd 3 (repeat 1.0) (m net maxspeed)
 
 buildWidget ctx@(rs,_,_) wd@CpuTop {refreshRate = refresh} = do
   draw <- makeTextPainter rs wd
@@ -497,6 +509,35 @@ buildWidget ctx@(rs,_,_) wd@CpuTop {refreshRate = refresh} = do
     top <- makeCpuDiff procs'' procs' dt
     return (procs'', ts'', top)
 
+buildWidget ctx@(rs,_,ref) wd@NetStatus {netdev_ = netdev, refreshRate = refresh} = do
+  draw <- makeTextPainter rs wd
+  net <- netState netdev
+  deltaT <- deltaTime
+  writeIORef ref $ draw ["Calculating..."]
+
+  runThread (net, deltaT, [0,0], 0) $ \(net', deltaT', total', totaldt') -> do
+      threadDelay $ round (1000000 * refresh)
+      (curr, net'') <- runModule net' ()
+      (dt, deltaT'') <- runModule deltaT' ()
+      let total'' = zipWith (+) total' curr
+          totaldt'' = totaldt' + dt
+          [currIn, currOut] = map (bytes . perSec dt) curr
+          [avgIn, avgOut] = map (bytes . perSec totaldt'') total''
+          message = printf "In: %s/s : Out: %s/s" currIn currOut
+          totalMessage = printf "Avg In: %s/s : Out: %s/s" avgIn avgOut
+      repaint ctx $ draw [message, totalMessage]
+      return (net'', deltaT'', total'', totaldt'')
+
+buildWidget ctx@(rs,_,ref) wd@MemStatus {refreshRate = refresh} = do
+  draw <- makeTextPainter rs wd
+  runStatelessThread $ do
+      x' <- readKeyValueFile ((`div` 1024) . read . head . words) "/proc/meminfo" :: IO (M.Map String Int)
+      let x = M.insert "Swap" ((x M.! "SwapTotal") - (x M.! "SwapFree")) x'
+      let values = ["MemFree", "Cached", "Buffers", "Swap", "Dirty", "Hugetlb"]
+      let mem = map (\n -> printf "%7s: %4d MB" n (x M.! n)) values
+      perPidInfo <- memInfo
+      repaint ctx $ draw $ map (pair (++)) $ zip mem perPidInfo
+      threadDelay $ round (1000000 * refresh)
 
 newtype Module m a b =
       Module (a -> m (b, Module m a b))
@@ -506,13 +547,6 @@ instance (Monad m) => Functor (Module m a) where
     Module $ \inp -> do
         (b, m') <- mf inp
         return (f b, fmap f m')
-
-deltaTime = do
-  ts <- getCurrentTime
-  let m ts' = Module $ \_ -> do
-      ts'' <- getCurrentTime
-      return (getDt ts'' ts', m ts'')
-  return $ m ts
 
 instance (Monad m) => Applicative (Module m a) where
   pure a = Module $ \_ -> return (a, pure a)
@@ -536,8 +570,22 @@ instance (Monad m) => Monad (Module m a) where
       return (v2, pipeModules m1' m2')
 -}
 
-
 runModule m inp = let Module f = m in f inp
+
+deltaTime = do
+  ts <- getCurrentTime
+  let m ts' = Module $ \_ -> do
+      ts'' <- getCurrentTime
+      return (getDt ts'' ts', m ts'')
+  return $ m ts
+
+netState netdev = do
+  net <- readNetFile "/proc/net/dev"
+  let m net' = Module $ \_ -> do
+      net'' <- readNetFile "/proc/net/dev"
+      let inout = getNetBytes $ zipWith (-) (net'' ! netdev) (net' ! netdev)
+      return (inout, m net'')
+  return (m net)
 
 buildGraphWidget ctx@(rs,_,ref) wd nlayers intervals sampler = do
   let (attr, colors, refresh, tscale) = (attr_ wd, colorTable wd, refreshRate wd, timeScale_ wd)
@@ -549,7 +597,6 @@ buildGraphWidget ctx@(rs,_,ref) wd nlayers intervals sampler = do
   let samp = fmap (scale . reverse . tail . scanl (+) 0) sampler
   let draw graph gd = withDrawWidget rs gd attr $ \d -> liftIO $ do
         drawRect (display rs) d bg x0 y0 ws hs
-        -- drawSegments (Segment ) 0xFF8080
         let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
                             . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph
         mapM_ (drawColorSegment rs) $ zip segments colorTable
@@ -779,14 +826,13 @@ handleEvent event@_ =
   liftIO $ print $ "Unhandled event:" ++
     eventName event ++ ": " ++ show event
 
-eventLoop :: RW ()
-eventLoop = forever $ do
-  dpy <- display . rs_ . head <$> reader windows
-  ch <- reader controlChan
-  event <- liftIO $ allocaXEvent $ \ev -> do
-    liftIO $ nextEvent dpy ev
+eventLoop :: Display -> ControlChan -> ROState -> RWState -> IO ()
+eventLoop dpy ch ro rw = do
+  event <- allocaXEvent $ \ev -> do
+    nextEvent dpy ev
     getEvent ev
-  handleEvent event
+  rw' <- runReaderT (execStateT (handleEvent event) rw) ro
+  eventLoop dpy ch ro rw'
 
 sendClientEvent :: Display -> Atom -> Window -> Atom -> IO ()
 sendClientEvent d a w val = do
@@ -869,6 +915,6 @@ main = do
   let ro = ROState { windows = wins, controlChan = controlCh }
   let rw = RWState { tooltip_ = Nothing, mouse_ = Nothing, iconCache_ = icons }
 
-  _ <- runReaderT (runStateT eventLoop rw) ro
+  eventLoop dpy controlCh ro rw
   return ()
 

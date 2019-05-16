@@ -79,7 +79,7 @@ pickProcValues selector = do
 
 memInfo = do
   mem <- pickProcValues memSelector :: IO [(String, (String, Int))]
-  return $! map display . take 4 . sortBy (flip compare `on` snd) . map snd $ mem where
+  return $! map display . take 6 . sortBy (flip compare `on` snd) . map snd $ mem where
     display (name, val) = printf " %7s - %s" (bytes val) name :: String
   
 
