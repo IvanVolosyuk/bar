@@ -1,4 +1,5 @@
-import Control.Concurrent
+import Control.Concurrent (forkOS, forkIO, myThreadId, threadDelay, killThread)
+import Control.Concurrent.BoundedChan
 import Control.Monad.Loops
 import Control.Monad.Reader
 import Control.Monad.State
@@ -277,7 +278,7 @@ formatClock fmt zoned = do
 type DrawCall a = StateT IconCache IO a
 type DrawCallback = Maybe XftDraw -> DrawCall ()
 type DrawRef = IORef DrawCallback
-type ControlChan = Chan ([Window] -> DrawCallback)
+type ControlChan = (BoundedChan ([Window] -> DrawCallback), BoundedChan ())
 data DrawableWidget = DrawableWidget Widget DrawRef
 data RenderState = RenderState {
   display :: Display,
@@ -335,6 +336,7 @@ liftIconCache f = do
   icons <- iconCache_ <$> get
   icons' <- liftIO $ execStateT f icons
   get >>= \s -> put s { iconCache_ = icons' }
+  return ()
 
 getIcon :: Window -> DrawCall CachedIcon
 getIcon w = do
@@ -411,13 +413,14 @@ makeTextPainter rs wd = do
   return $ drawStringWidget rs wd fn
 
 repaint :: (RenderState, ControlChan, DrawRef) -> DrawCallback -> IO ()
-repaint (rs, ch, ref) drawable = do
+repaint (rs, (ch,ch2), ref) drawable = do
   tid <- myThreadId
   let drawable' winids d = do
           let w = window rs
           if window rs `elem` winids then drawable d else liftIO (killThread tid)
   writeIORef ref drawable
   writeChan ch drawable'
+  writeChan ch2 ()
 
 runStatelessThread :: IO a -> IO ()
 runStatelessThread action = void $ forkIO $ forever action
@@ -433,7 +436,7 @@ buildWidget (rs,_,ref) wd@Label { label_ = msg } = do
 
 buildWidget ctx@(rs,_,_) wd@Latency {} = do
   draw <- makeTextPainter rs wd
-  backChan <- newChan :: IO (Chan Char)
+  backChan <- newBoundedChan 1 :: IO (BoundedChan Char)
   ts <- getCurrentTime
   runThread ts $ \prev-> do
     ts <- getCurrentTime
@@ -597,7 +600,7 @@ buildGraphWidget ctx@(rs,_,ref) wd nlayers intervals sampler = do
   let samp = fmap (scale . reverse . tail . scanl (+) 0) sampler
   let draw graph gd = withDrawWidget rs gd attr $ \d -> liftIO $ do
         drawRect (display rs) d bg x0 y0 ws hs
-        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
+        let segments = ($!) map (map (makeSegment y0 hs) . filter ((/=0) . snd)
                             . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph
         mapM_ (drawColorSegment rs) $ zip segments colorTable
   writeIORef ref $ draw graph
@@ -806,7 +809,7 @@ handleEvent ExposeEvent { ev_window = w } = do
   mapM_ (\win -> when (w == (window . rs_) win) $ paintWindow win) allwins
 
 handleEvent ClientMessageEvent {} = do
-  ch <- reader controlChan
+  (ch,_) <- reader controlChan
   allWinIds <- map (window . rs_) <$> allWindows
   liftIO (readChan ch) >>= \act -> liftIconCache $ act allWinIds Nothing
 
@@ -828,10 +831,10 @@ handleEvent event@_ =
 
 eventLoop :: Display -> ControlChan -> ROState -> RWState -> IO ()
 eventLoop dpy ch ro rw = do
-  event <- allocaXEvent $ \ev -> do
+  rw' <- ($!) allocaXEvent $ \ev -> do
     nextEvent dpy ev
-    getEvent ev
-  rw' <- runReaderT (execStateT (handleEvent event) rw) ro
+    event <- getEvent ev
+    runReaderT (execStateT (handleEvent event) rw) ro
   eventLoop dpy ch ro rw'
 
 sendClientEvent :: Display -> Atom -> Window -> Atom -> IO ()
@@ -842,13 +845,12 @@ sendClientEvent d a w val = do
          sendEvent d w False structureNotifyMask e
     sync d False
 
-copyChanToX :: Chan a -> Window -> IO ()
-copyChanToX chan w = do
-  chanCopy <- dupChan chan
+copyChanToX :: ControlChan -> Window -> IO ()
+copyChanToX (_,chan) w = do
   d <- openDisplay ""
   a <- internAtom d "BAR_UPDATE" False
   forever $ do
-     _ <- readChan chanCopy
+     _ <- readChan chan
      sendClientEvent d a w 0 `catchIOError`  \x -> do
        print $ "Exception caught: " ++ show x
        sync d False
@@ -907,14 +909,17 @@ main :: IO ()
 main = do
   xSetErrorHandler
   dpy <- openDisplay ""
-  controlCh <- newChan :: IO ControlChan
+  -- FIXME: increase to improve throughput?
+  controlCh <- newBoundedChan 1
+  signalCh <- newBoundedChan 1
+  let ch = (controlCh, signalCh)
 
-  wins <- evalStateT (mapM (makeBar dpy controlCh) bars) True
+  wins <- evalStateT (mapM (makeBar dpy ch) bars) True
   icons <- makeIconCache dpy
 
-  let ro = ROState { windows = wins, controlChan = controlCh }
+  let ro = ROState { windows = wins, controlChan = ch}
   let rw = RWState { tooltip_ = Nothing, mouse_ = Nothing, iconCache_ = icons }
 
-  eventLoop dpy controlCh ro rw
+  eventLoop dpy ch ro rw
   return ()
 

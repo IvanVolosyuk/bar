@@ -69,7 +69,7 @@ readFiles (pid:pids) = do
       return (c:others)
   
 pickCpuUsage :: IO (M.Map String (String, Int))
-pickCpuUsage = M.fromList <$> pickProcValues cpuSelector
+pickCpuUsage = ($!) M.fromList <$> pickProcValues cpuSelector
 
 pickProcValues selector = do
   x <- getDirectoryContents "/proc"
