@@ -1,5 +1,8 @@
-import Control.Concurrent (forkOS, forkIO, myThreadId, threadDelay, killThread)
+import Control.Applicative
+import Control.Auto
+import Control.Auto.Core
 import Control.Concurrent.BoundedChan
+import Control.Concurrent (forkOS, forkIO, myThreadId, threadDelay, killThread)
 import Control.Monad.Loops
 import Control.Monad.Reader
 import Control.Monad.State
@@ -22,6 +25,7 @@ import System.IO.Error
 import Text.Printf
 
 import qualified Data.Map as M
+import Prelude hiding ((.))
 
 import DzenParse
 import Icon
@@ -278,8 +282,13 @@ formatClock fmt zoned = do
 type DrawCall a = StateT IconCache IO a
 type DrawCallback = Maybe XftDraw -> DrawCall ()
 type DrawRef = IORef DrawCallback
-type ControlChan = (BoundedChan ([Window] -> DrawCallback), BoundedChan ())
-data DrawableWidget = DrawableWidget Widget DrawRef
+type ControlChan = (BoundedChan ([Window] -> DrawCallback), BoundedChan Atom)
+
+data UpdateType = Tick NominalDiffTime | GraphUpdate [[Int]] deriving (Show, Eq)
+data Cmd = Reset | Redraw | Update UpdateType deriving (Show, Eq)
+
+type DrawModule = Auto IO Cmd DrawCallback
+data DrawableWidget = DrawableWidget Widget DrawCallback
 data RenderState = RenderState {
   display :: Display,
   window :: Window,
@@ -420,7 +429,7 @@ repaint (rs, (ch,ch2), ref) drawable = do
           if window rs `elem` winids then drawable d else liftIO (killThread tid)
   writeIORef ref drawable
   writeChan ch drawable'
-  writeChan ch2 ()
+  writeChan ch2 0
 
 runStatelessThread :: IO a -> IO ()
 runStatelessThread action = void $ forkIO $ forever action
@@ -428,13 +437,17 @@ runStatelessThread action = void $ forkIO $ forever action
 runThread :: a -> (a -> IO a) -> IO ()
 runThread a f = void $ forkIO $ iterateM_ f a
 
-buildWidget :: (RenderState, ControlChan, DrawRef) -> Widget -> IO ()
+refDraw :: IORef DrawCallback -> DrawCallback
+refDraw ref d = liftIO (readIORef ref) >>= \cb -> cb d
+
+buildWidget :: (RenderState, ControlChan, DrawRef) -> Widget -> IO DrawCallback
 
 buildWidget (rs,_,ref) wd@Label { label_ = msg } = do
   draw <- makeTextPainter rs wd
   writeIORef ref $ draw [msg]
+  return $ refDraw ref
 
-buildWidget ctx@(rs,_,_) wd@Latency {} = do
+buildWidget ctx@(rs,_,ref) wd@Latency {} = do
   draw <- makeTextPainter rs wd
   backChan <- newBoundedChan 1 :: IO (BoundedChan Char)
   ts <- getCurrentTime
@@ -446,8 +459,9 @@ buildWidget ctx@(rs,_,_) wd@Latency {} = do
     _ <- readChan backChan
     threadDelay 1
     return ts
+  return $ refDraw ref
 
-buildWidget ctx@(rs,_,_) wd@Clock {} = do
+buildWidget ctx@(rs,_,ref) wd@Clock {} = do
   draw <- makeTextPainter rs wd
   tz <- case tz_ wd of
           LocalTimeZone -> localTimezone
@@ -457,45 +471,50 @@ buildWidget ctx@(rs,_,_) wd@Clock {} = do
     msg <- formatClock (fmt_ wd) tz
     repaint ctx $ draw [msg]
     threadDelay 1000000
+  return $ refDraw ref
 
-buildWidget ctx@(rs,_,_) wd@Title {} = do
+buildWidget ctx@(rs,_,ref) wd@Title {} = do
   draw <- makeTextPainter rs wd
   thr <- myThreadId
   let makeAction thr result = case result of
         Left _ -> const $ liftIO $ killThread thr
         Right msg -> draw [msg]
   runStatelessThread $ makeAction thr <$> tryIOError getLine >>= repaint ctx
+  return $ refDraw ref
 
-buildWidget ctx wd@CpuGraph {} = do
+buildWidget ctx@(_,_,ref) wd@CpuGraph {} = do
   let readCPU = map read . tail. words . head . lines <$> readFully "/proc/stat"
   cpu <- readCPU
-  let m cpu' = Module $ \_ -> do
+  let m cpu' = mkAutoM_ $ \_ -> do
       cpu'' <- readCPU
       let (user:nice:sys:idle:io:_) = zipWith (-) cpu'' cpu'
       return ([sys + io, nice, user, idle], m cpu'')
   buildGraphWidget ctx wd 3 (repeat 1.0) (m cpu)
+  return $ refDraw ref
 
-buildWidget ctx wd@MemGraph {} = do
-  let m = Module $ \_ -> do
+buildWidget ctx@(_,_,ref) wd@MemGraph {} = do
+  let m = mkAutoM_ $ \_ -> do
       mem <- readBatteryFile "/proc/meminfo"
       let [total,free,cached] = map (read . (mem !)) ["MemTotal", "MemFree", "Cached"]
       return ([total - free - cached, total - free, total], m)
   buildGraphWidget ctx wd 2 (0.0 : repeat 1.0) m
+  return $ refDraw ref
 
-buildWidget ctx wd@NetGraph {netdev_ = netdev} = do
+buildWidget ctx@(_,_,ref) wd@NetGraph {netdev_ = netdev} = do
   let f x = log (x + 1)
       f2 x = f x * f x * f x
   net <- fmap (map f2) <$> netState netdev
   maxspeed <- fmap (f2 . (*100000000)) <$> deltaTime
 
-  let m net' maxspeed' = Module $ \_ -> do
-      ([inbound, outbound], net'') <- runModule net' ()
-      (maxs, maxspeed'') <- runModule maxspeed' ()
+  let m net' maxspeed' = mkAutoM_ $ \_ -> do
+      ([inbound, outbound], net'') <- stepAuto net' ()
+      (maxs, maxspeed'') <- stepAuto maxspeed' ()
       let out = map (truncate . max 0) [inbound, maxs - inbound - outbound, outbound, 0]
       return (out, m net'' maxspeed'')
   buildGraphWidget ctx wd 3 (repeat 1.0) (m net maxspeed)
+  return $ refDraw ref
 
-buildWidget ctx@(rs,_,_) wd@CpuTop {refreshRate = refresh} = do
+buildWidget ctx@(rs,_,ref) wd@CpuTop {refreshRate = refresh} = do
   draw <- makeTextPainter rs wd
   let loadavg = foldl (\a b -> a++" "++b) "Load avg: " . take 3 . words <$> readFully "/proc/loadavg"
   procs <- pickCpuUsage
@@ -511,6 +530,7 @@ buildWidget ctx@(rs,_,_) wd@CpuTop {refreshRate = refresh} = do
     let dt = getDt ts'' ts'
     top <- makeCpuDiff procs'' procs' dt
     return (procs'', ts'', top)
+  return $ refDraw ref
 
 buildWidget ctx@(rs,_,ref) wd@NetStatus {netdev_ = netdev, refreshRate = refresh} = do
   draw <- makeTextPainter rs wd
@@ -520,8 +540,8 @@ buildWidget ctx@(rs,_,ref) wd@NetStatus {netdev_ = netdev, refreshRate = refresh
 
   runThread (net, deltaT, [0,0], 0) $ \(net', deltaT', total', totaldt') -> do
       threadDelay $ round (1000000 * refresh)
-      (curr, net'') <- runModule net' ()
-      (dt, deltaT'') <- runModule deltaT' ()
+      (curr, net'') <- stepAuto net' ()
+      (dt, deltaT'') <- stepAuto deltaT' ()
       let total'' = zipWith (+) total' curr
           totaldt'' = totaldt' + dt
           [currIn, currOut] = map (bytes . perSec dt) curr
@@ -530,6 +550,7 @@ buildWidget ctx@(rs,_,ref) wd@NetStatus {netdev_ = netdev, refreshRate = refresh
           totalMessage = printf "Avg In: %s/s : Out: %s/s" avgIn avgOut
       repaint ctx $ draw [message, totalMessage]
       return (net'', deltaT'', total'', totaldt'')
+  return $ refDraw ref
 
 buildWidget ctx@(rs,_,ref) wd@MemStatus {refreshRate = refresh} = do
   draw <- makeTextPainter rs wd
@@ -541,50 +562,18 @@ buildWidget ctx@(rs,_,ref) wd@MemStatus {refreshRate = refresh} = do
       perPidInfo <- memInfo
       repaint ctx $ draw $ map (pair (++)) $ zip mem perPidInfo
       threadDelay $ round (1000000 * refresh)
-
-newtype Module m a b =
-      Module (a -> m (b, Module m a b))
-
-instance (Monad m) => Functor (Module m a) where
-  fmap f (Module mf) =
-    Module $ \inp -> do
-        (b, m') <- mf inp
-        return (f b, fmap f m')
-
-instance (Monad m) => Applicative (Module m a) where
-  pure a = Module $ \_ -> return (a, pure a)
-  Module f1 <*> Module f2 = Module $ \inp -> do
-    (f, m1') <- f1 inp
-    (x, m2') <- f2 inp
-    return (f x, m1' <*> m2')
-
-pipeModules :: (Monad m) => Module m a b -> Module m b c -> Module m a c
-pipeModules (Module m1) (Module m2) = Module $ \inp -> do
-    (v1, m1') <- m1 inp
-    (v2, m2') <- m2 v1
-    return (v2, pipeModules m1' m2')
-
-{-
-instance (Monad m) => Monad (Module m a) where
-  (>>=) (Module f) mf = Module $ \inp -> do
-      (v, m1') <- f inp
-      let Module m2 = mf v
-      (v2, m2') <- m2 v
-      return (v2, pipeModules m1' m2')
--}
-
-runModule m inp = let Module f = m in f inp
+  return $ refDraw ref
 
 deltaTime = do
   ts <- getCurrentTime
-  let m ts' = Module $ \_ -> do
+  let m ts' = mkAutoM_ $ \_ -> do
       ts'' <- getCurrentTime
       return (getDt ts'' ts', m ts'')
   return $ m ts
 
 netState netdev = do
   net <- readNetFile "/proc/net/dev"
-  let m net' = Module $ \_ -> do
+  let m net' = mkAutoM_ $ \_ -> do
       net'' <- readNetFile "/proc/net/dev"
       let inout = getNetBytes $ zipWith (-) (net'' ! netdev) (net' ! netdev)
       return (inout, m net'')
@@ -607,7 +596,7 @@ buildGraphWidget ctx@(rs,_,ref) wd nlayers intervals sampler = do
 
   runThread (intervals, samp, graph) $ \(ivals, samp', graph')-> do
     threadDelay $ round (1000000 * refresh * head ivals)
-    (sample, samp'') <- runModule samp' ()
+    (sample, samp'') <- stepAuto samp' ()
     let graph'' = updateGraph graph' sample ws
     repaint ctx $ draw graph''
     return (tail ivals, samp'', graph'')
@@ -683,8 +672,8 @@ layoutWidget rs ch wpos ort wd = do
   liftIO $ print wa'
 
   ref <- liftIO $ newIORef $ const $ return ()
-  liftIO $ buildWidget (rs, ch, ref) wd'
-  put (DrawableWidget wd' ref : out, newpos)
+  cb <- liftIO $ buildWidget (rs, ch, ref) wd'
+  put (DrawableWidget wd' cb : out, newpos)
 
 layoutWidgets :: RenderState -> ControlChan -> Size -> Orientation -> [Widget] -> IO [DrawableWidget]
 layoutWidgets rs ch wsz orien wds = do
@@ -703,7 +692,7 @@ paintWindow (WindowState rs wds bg) = do
     liftIO $ copyToWindow rs 0 0 (fi width) (fi height)
     liftIO $ sync dpy False where
       draw :: Maybe XftDraw -> DrawableWidget -> DrawCall ()
-      draw d (DrawableWidget _ ref) = liftIO (readIORef ref) >>= \cb -> cb d
+      draw d (DrawableWidget _ cb) = cb d
 
 windowMapAndSelectInput :: Display -> Window -> Word64 -> IO ()
 windowMapAndSelectInput dpy w mask = do
@@ -808,7 +797,7 @@ handleEvent ExposeEvent { ev_window = w } = do
   let allwins = maybeToList tip ++ wins
   mapM_ (\win -> when (w == (window . rs_) win) $ paintWindow win) allwins
 
-handleEvent ClientMessageEvent {} = do
+handleEvent ClientMessageEvent {ev_data = 0:_} = do
   (ch,_) <- reader controlChan
   allWinIds <- map (window . rs_) <$> allWindows
   liftIO (readChan ch) >>= \act -> liftIconCache $ act allWinIds Nothing
@@ -850,8 +839,8 @@ copyChanToX (_,chan) w = do
   d <- openDisplay ""
   a <- internAtom d "BAR_UPDATE" False
   forever $ do
-     _ <- readChan chan
-     sendClientEvent d a w 0 `catchIOError`  \x -> do
+     val <- readChan chan
+     sendClientEvent d a w val `catchIOError`  \x -> do
        print $ "Exception caught: " ++ show x
        sync d False
 
