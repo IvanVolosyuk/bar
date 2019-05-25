@@ -1,8 +1,14 @@
+{-# LANGUAGE Arrows #-}
+
 import Control.Applicative
 import Control.Auto
+import Control.Auto.Blip
+import Control.Auto.Blip.Internal
+import Control.Auto.Collection
 import Control.Auto.Core
-import Control.Concurrent.BoundedChan
-import Control.Concurrent (forkOS, forkIO, myThreadId, threadDelay, killThread)
+import Control.Auto.Effects
+import Control.Auto.Time
+import Control.Concurrent
 import Control.Monad.Loops
 import Control.Monad.Reader
 import Control.Monad.State
@@ -25,10 +31,13 @@ import System.IO.Error
 import Text.Printf
 
 import qualified Data.Map as M
-import Prelude hiding ((.))
+import qualified Data.IntMap as IM
+import qualified Data.Set as S
+import Prelude hiding (id, (.))
 
 import DzenParse
 import Icon
+import Timer
 import Top
 import Utils
 
@@ -54,14 +63,19 @@ bars :: [Bar]
 --bars = [bar1, bar2]
 bars = [bar1]
 
+bar1a = Bar barBackground barHeight {-screen-} 0 GravityBottom [
+  label # Message "foo" # Width 50 # memTooltip2
+                                                ]
 bar1 :: Bar
-bar1 = Bar barHeight {-screen-} 0 GravityBottom [
-        clock # TimeFormat "%R" #
-            Width 60 # RightPadding 4 #
+bar1 = Bar barBackground barHeight {-screen-} 0 GravityBottom [
+        clock # TimeFormat "%R:%S" #
+            Width 90 # RightPadding 4 #
             LocalTimeZone # BackgroundColor infoBackground #
             clockTooltip,
-        cpu # cpuTooltip,
-        mem # memTooltip,
+        logtm cpu # cpuTooltip2,
+        label # Message "foo" # Width 50,
+        logtm cpu # cpuTooltip2,
+        logtm mem # memTooltip2,
         net "brkvm",
 
         title # LeftPadding 2 # RightPadding 2 #
@@ -70,8 +84,8 @@ bar1 = Bar barHeight {-screen-} 0 GravityBottom [
       ]
 
 bar2 :: Bar
-bar2 = Bar (barHeight*2) {-screen-} 0 GravityTop [
-        clock # TimeFormat "%R" #
+bar2 = Bar barBackground (barHeight*2) {-screen-} 0 GravityTop [
+        clock # TimeFormat "%R" # 
             Width 60 # RightPadding 4 #
             LocalTimeZone # BackgroundColor infoBackground #
             clockTooltip,
@@ -81,7 +95,7 @@ bar2 = Bar (barHeight*2) {-screen-} 0 GravityTop [
                 JustifyLeft # TextColor "#000000"
       ]
 
-clockTooltip = Tooltip (Size 460 (barHeight * 2)) Horizontal [
+clockTooltip = Tooltip tooltipBackground (Size 460 (barHeight * 2)) Horizontal [
         frame Vertical [
                          tooltipClock #OtherTimeZone "America/Los_Angeles",
                          tooltipClock
@@ -92,20 +106,30 @@ clockTooltip = Tooltip (Size 460 (barHeight * 2)) Horizontal [
                        ]
  ]
 
-cpuTooltip = Tooltip (Size 300 (6*barHeight)) Horizontal [
+cpuTooltip = Tooltip tooltipBackground (Size 300 (6*barHeight)) Horizontal [
      tooltipText cpuTop #Width 280,
      tooltip cpu #RefreshRate 0.1 # Width 20 #LinearTime
      ]
 
-memTooltip = Tooltip (Size 450 (6*barHeight)) Horizontal [
+cpuTooltip2 = Tooltip tooltipBackground (Size 300 (6*barHeight)) Horizontal [
+     tooltip cpu # RefreshRate 0.05 # Width 300
+     ]
+
+memTooltip = Tooltip tooltipBackground (Size 450 (6*barHeight)) Horizontal [
      tooltipText memstatus #Width 430 #LeftPadding 5,
      tooltip mem #RefreshRate 0.1 # Width 20 #LinearTime
      ]
 
-netTooltip netdev = Tooltip (Size 400 (2*barHeight)) Horizontal [
+memTooltip2 = Tooltip tooltipBackground (Size 450 (6*barHeight)) Horizontal [
+     tooltip mem #RefreshRate 1 # LinearTime
+     ]
+
+netTooltip netdev = Tooltip tooltipBackground (Size 400 (2*barHeight)) Horizontal [
      tooltipText (netstatus netdev) #RefreshRate 3 # Width 380 #JustifyLeft #LeftPadding 10,
      tooltip (tooltipNet netdev) #RefreshRate 0.1 #LinearTime # Width 20
      ]
+
+logtm w = w # LogTime 8 # Width 129 # RefreshRate 1 -- One week worth of data
 
 tooltip w = w #BackgroundColor "#FFFFC0"
               #TopPadding 0 #BottomPadding 1 #LeftPadding 0 #RightPadding 1
@@ -115,17 +139,17 @@ tooltipText w = tooltip w  #TextColor "#000000"
 
 tooltipClock = tooltipText clock #TimeFormat "%a, %e %b %Y - %X"
 tooltipLabel = tooltipText label
-tooltipNet netdev = NetGraph defaultAttr ["#6060FF", tooltipBackground, "#60FF60"] 1 (LogTime 8) netdev # Width 129
+tooltipNet netdev = Graph defaultAttr (GraphDef (Net netdev) (LogTime 8) 1)
+                    ["#6060FF", tooltipBackground, "#60FF60"]  # Width 129
 
 data Attribute = Width Int | Height Int | LeftPadding Int | RightPadding Int
                | TopPadding Int | BottomPadding Int
                | TextColor Main.Color | BackgroundColor Main.Color
                | TimeFormat String | Message String | SetFont String
-               | RefreshRate Double
+               | RefreshRate Period
 
 type Color = String
 type Font = String
-data Size = Size {x_ :: Int, y_ :: Int} deriving Show
 type Pos = Size
 
 type OnClickCmd = String
@@ -133,55 +157,54 @@ type OnClickCmd = String
 data Gravity = GravityTop | GravityBottom deriving (Show, Eq)
 data Orientation = Horizontal | Vertical deriving (Show, Eq)
 
-data ClockTimeZone = LocalTimeZone | OtherTimeZone String deriving Show
-data Justify = JustifyLeft | JustifyMiddle | JustifyRight deriving Show
-data Padding = Padding Size Size deriving Show
-data TextAttributes = TextAttributes Main.Color Justify Main.Font Int deriving Show
+data ClockTimeZone = LocalTimeZone | OtherTimeZone String deriving (Show, Eq)
+data Justify = JustifyLeft | JustifyMiddle | JustifyRight deriving (Show, Eq)
+data Padding = Padding Size Size deriving (Show, Eq)
+data TextAttributes = TextAttributes Main.Color Justify Main.Font Int deriving (Show, Eq)
 data WidgetAttributes = WidgetAttributes {
   size :: Size,
   position :: Pos,
   padding :: Padding,
   color :: Main.Color,
   onclick :: Maybe OnClickCmd,
-  mbtooltip :: Maybe Tooltip } deriving Show
+  mbtooltip :: Maybe Tooltip } deriving (Show, Eq)
 
 -- int = n linear points before 2x compression
-data TimeScale = LinearTime | LogTime Int deriving Show
+data GraphType = Cpu | Net String | Mem | Battery deriving (Show,Eq,Ord)
+data TimeScale = LinearTime | LogTime Int deriving (Show,Eq,Ord)
+data GraphDef = GraphDef { type_ :: GraphType, tscale_ :: TimeScale, period_ :: Period} deriving (Show, Eq, Ord)
 
+data Bar = Bar String Int ScreenNumber Gravity [Widget] deriving Show
+data Tooltip = Tooltip String Size Orientation [Widget] deriving (Show, Eq)
 
-data Bar = Bar Int ScreenNumber Gravity [Widget] deriving Show
-data Tooltip = Tooltip Size Orientation [Widget] deriving Show
-
-data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_ :: String, tz_ :: ClockTimeZone }
+data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_ :: String, tz_ :: ClockTimeZone, refreshRate :: Period }
           | Label   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, label_ ::  String }
           | Title   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
-          | CpuTop  {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Double}
-          | NetStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Double, netdev_ :: String}
-          | MemStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Double}
-          | Latency {attr_ :: WidgetAttributes, tattr_ :: TextAttributes }
+          | CpuTop  {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period}
+          | NetStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period, netdev_ :: String}
+          | MemStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period}
           | Frame   {attr_ :: WidgetAttributes, orient_ :: Orientation, children_ :: [Widget]}
-          | CpuGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double, timeScale_ :: TimeScale}
-          | MemGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double, timeScale_ :: TimeScale}
-          | NetGraph{attr_ :: WidgetAttributes, colorTable :: [String], refreshRate :: Double, timeScale_ :: TimeScale, netdev_ :: String}
-          deriving Show
+          | Graph   {attr_ :: WidgetAttributes, graph_ :: GraphDef, colorTable :: [String]}
+          deriving (Show, Eq)
 
 defaultAttr :: WidgetAttributes
-defaultAttr = WidgetAttributes (Size 5000 barHeight) 0 (Padding 1 1) infoBackground Nothing Nothing
+defaultAttr = WidgetAttributes (Size 400 barHeight) 0 (Padding 1 1) infoBackground Nothing Nothing
 
 defaultTAttr :: TextAttributes
 defaultTAttr = TextAttributes "#C7AE86" JustifyMiddle "-*-*-medium-r-normal--15-*-*-*-*-*-iso10646-*" barHeight
 
 clock :: Widget
-clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone
+clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone 1
 
 cpu :: Widget
-cpu = CpuGraph defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 1 (LogTime 8) # Width 129
+cpu = Graph defaultAttr (GraphDef Cpu (LogTime 8) 1) ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] -- # Width 129
 
 mem :: Widget
-mem = MemGraph defaultAttr ["#00FF00", "#6060FF"] 1 (LogTime 8) # Width 129
+mem = Graph defaultAttr (GraphDef Mem (LogTime 8) 1) ["#00FF00", "#6060FF"] -- # Width 129
 
 net :: String -> Widget
-net netdev = NetGraph defaultAttr ["#6060FF", infoBackground, "#60FF60"] 1 (LogTime 8) netdev # Width 129 #netTooltip netdev
+net netdev = Graph defaultAttr (GraphDef (Net netdev) (LogTime 8) 1)
+             ["#6060FF", infoBackground, "#60FF60"] # Width 129 #netTooltip netdev
 
 netstatus :: String -> Widget
 netstatus = NetStatus defaultAttr defaultTAttr 1
@@ -194,9 +217,6 @@ label = Label defaultAttr defaultTAttr ""
 
 title :: Widget
 title = Title defaultAttr defaultTAttr # Width 4000
-
-latency :: Widget
-latency = Latency defaultAttr defaultTAttr
 
 cpuTop :: Widget
 cpuTop = CpuTop defaultAttr defaultTAttr 3 # JustifyLeft
@@ -215,7 +235,7 @@ instance Apply Justify where
   apply j ww = let TextAttributes c _ f hs = tattr_ ww in ww { tattr_ = TextAttributes c j f hs}
 
 instance Apply TimeScale where
-  apply t ww = ww { timeScale_ = t }
+  apply t ww = let g = graph_ ww in ww { graph_ = g { tscale_ = t } }
 
 instance Apply Tooltip where
   apply tip ww = let WidgetAttributes ws x p c cmd _ = attr_ ww
@@ -239,6 +259,7 @@ instance Apply Attribute where
                                                      WidgetAttributes ws x p c cmd tip
   apply (TimeFormat fmt) ww = ww { fmt_ = fmt }
   apply (Message s) ww = ww { label_ = s }
+  apply (RefreshRate r) ww@(Graph _ def _) = ww { graph_ = def {period_ = r }}
   apply (RefreshRate r) ww = ww { refreshRate = r }
 
 instance Num Size where
@@ -279,16 +300,13 @@ formatClock fmt zoned = do
   zonedTime <- zoned time
   return $ formatTime Data.Time.defaultTimeLocale fmt zonedTime
 
+
+
 type DrawCall a = StateT IconCache IO a
 type DrawCallback = Maybe XftDraw -> DrawCall ()
 type DrawRef = IORef DrawCallback
-type ControlChan = (BoundedChan ([Window] -> DrawCallback), BoundedChan Atom)
+type ControlChan = Chan RootInput
 
-data UpdateType = Tick NominalDiffTime | GraphUpdate [[Int]] deriving (Show, Eq)
-data Cmd = Reset | Redraw | Update UpdateType deriving (Show, Eq)
-
-type DrawModule = Auto IO Cmd DrawCallback
-data DrawableWidget = DrawableWidget Widget DrawCallback
 data RenderState = RenderState {
   display :: Display,
   window :: Window,
@@ -296,34 +314,14 @@ data RenderState = RenderState {
   gc_ :: GC,
   windowWidth :: Int,
   windowHeight :: Int,
+  windowBackground :: String,
   screenNum :: ScreenNumber
 }
 
-data WindowState = WindowState {
-  rs_ :: RenderState,
-  widgets_ :: [DrawableWidget],
-  winBackground :: String
-}
+data WindowState = WindowState RenderState [Widget]
 
-data ROState = ROState {
-  windows :: [WindowState],
-  controlChan :: ControlChan
-}
-
-data RWState = RWState {
-  tooltip_ :: Maybe WindowState,
-  mouse_ :: Maybe Size,
-  iconCache_ :: IconCache
-}
-
-type RW a = StateT RWState (ReaderT ROState IO) a
-
-instance Show DrawableWidget where
-  show (DrawableWidget x _) = "Drawable " ++ show x
-
-copyToWindow :: RenderState -> Int -> Int -> Int -> Int -> IO ()
-copyToWindow RenderState {display = dpy, buffer = buf, window = w, gc_ = gc} x y width height =
-  liftIO $ copyArea dpy buf w gc (fi x) (fi y) (fi width) (fi height) (fi x) (fi y)
+instance Show RenderState where
+  show RenderState {} = "RenderState "
 
 visualColormap :: Display -> (Visual, Colormap)
 visualColormap dpy = (vis, colormap) where
@@ -340,20 +338,6 @@ withDrawState rs action = do
   s' <- get >>= \s -> liftIO $ withDraw rs $ \d -> execStateT (action d) s
   put s'
 
-liftIconCache :: DrawCall () -> RW ()
-liftIconCache f = do
-  icons <- iconCache_ <$> get
-  icons' <- liftIO $ execStateT f icons
-  get >>= \s -> put s { iconCache_ = icons' }
-  return ()
-
-getIcon :: Window -> DrawCall CachedIcon
-getIcon w = do
-  icons <- get
-  (icons', img) <- liftIO $ loadIconImage icons w
-  put icons'
-  return img
-
 withDrawWidget :: RenderState -> Maybe XftDraw -> WidgetAttributes -> (XftDraw -> DrawCall ()) -> DrawCall ()
 withDrawWidget rs globalDraw attr action = do
   let WidgetAttributes (Size ws hs) (Size x y) _ wbg _ _ = attr
@@ -365,10 +349,7 @@ withDrawWidget rs globalDraw attr action = do
 
   case globalDraw of
     Just d -> clipAndDraw d
-    Nothing -> withDrawState rs $ \d -> do
-        clipAndDraw d
-        liftIO $ copyToWindow rs (fi x) (fi y) (fi ws) (fi hs)
-        liftIO $ sync (display rs) False
+    Nothing -> withDrawState rs $ \d -> clipAndDraw d
 
 
 withColor :: Display -> String -> (XftColor -> IO ()) -> IO ()
@@ -376,7 +357,7 @@ withColor dpy = withXftColorName dpy vis colormap where
   (vis, colormap) = visualColormap dpy
 
 
-drawMessage rs attr tattr font d off (Text fg bg msg) = do
+drawMessage rs attr tattr font d (icons, off) (Text fg bg msg) = do
   let WidgetAttributes sz pos  _ wbg _ _ = attr
   let TextAttributes wfg justify _ ths = tattr
   let dpy = display rs
@@ -393,28 +374,32 @@ drawMessage rs attr tattr font d off (Text fg bg msg) = do
   -- liftIO $ print (show msg ++ "  " ++ show x' ++ " " ++ show y' ++ " w:" ++ show txoff)
   liftIO $ forM_ bg $ \c -> drawRect dpy d c (x + xoff) (y + yoff) ws ths
   liftIO $ withColor dpy fg' $ \c -> xftDrawString d c font (x' + xoff) (y' + yoff) msg
-  return $ Size (xoff + txoff) yoff
+  return (icons, Size (xoff + txoff) yoff)
 
-drawMessage rs attr tattr font d off (IconRef wid) = do
+drawMessage rs attr tattr font d (icons, off) (IconRef icon) = do
   let WidgetAttributes sz pos  _ wbg _ _ = attr
   let (Size ws _, Size x y, Size xoff yoff) = (sz, pos, off)
   let TextAttributes _ _ _ ths = tattr
-  CachedIcon width height img <- getIcon $ fi wid
-  liftIO $ putImage (display rs) (buffer rs) (gc_ rs)
+
+  (icons', CachedIcon width height img) <- loadIconImage icons icon
+  putImage (display rs) (buffer rs) (gc_ rs)
            img 0 0 (fi $ x + xoff) (fi $ y + yoff + ((ths - height) `div` 2)) (fi width) (fi height)
-  return $ Size (xoff + width) yoff
+  return (icons', Size (xoff + width) yoff)
 
 drawMessages :: RenderState -> WidgetAttributes -> TextAttributes
-             -> XftFont -> XftDraw -> Int -> String -> DrawCall Int
-drawMessages rs attr tattr font d yoff msg = do
+             -> XftFont -> XftDraw -> (IconCache, Int) -> String -> IO (IconCache, Int)
+drawMessages rs attr tattr font d (icons, yoff) msg = do
   let TextAttributes _ _ _ ths = tattr
-  foldM_ (drawMessage rs attr tattr font d) (Size 0 yoff) (parseLine msg)
-  return $ yoff + ths
+  (icons', _) <- foldM (drawMessage rs attr tattr font d) (icons, Size 0 yoff) (parseLine msg)
+  return (icons', yoff + ths)
 
 drawStringWidget :: RenderState -> Widget -> XftFont -> [String] -> Maybe XftDraw -> DrawCall ()
 drawStringWidget rs@RenderState { display = dpy } wd font strings globalDraw = do
   let draw = drawMessages rs (attr_ wd) (tattr_ wd) font
-  withDrawWidget rs globalDraw (attr_ wd) $ \d -> foldM_ (draw d) 0 strings
+  withDrawWidget rs globalDraw (attr_ wd) $ \d -> do
+    icons <- get
+    (icons', _) <- liftIO $ foldM (draw d) (icons, 0) strings
+    put icons'
 
 makeTextPainter :: RenderState -> Widget -> IO ([String] -> DrawCallback)
 makeTextPainter rs wd = do
@@ -422,97 +407,26 @@ makeTextPainter rs wd = do
   return $ drawStringWidget rs wd fn
 
 repaint :: (RenderState, ControlChan, DrawRef) -> DrawCallback -> IO ()
-repaint (rs, (ch,ch2), ref) drawable = do
+repaint (rs, ch, ref) drawable = do
   tid <- myThreadId
   let drawable' winids d = do
           let w = window rs
           if window rs `elem` winids then drawable d else liftIO (killThread tid)
   writeIORef ref drawable
-  writeChan ch drawable'
-  writeChan ch2 0
+  -- writeChan ch $ LegacyDraw drawable'
 
 runStatelessThread :: IO a -> IO ()
-runStatelessThread action = void $ forkIO $ forever action
+--runStatelessThread action = void $ forkIO $ forever action
+runStatelessThread action = return ()
 
 runThread :: a -> (a -> IO a) -> IO ()
-runThread a f = void $ forkIO $ iterateM_ f a
+--runThread a f = void $ forkIO $ iterateM_ f a
+runThread a f = return ()
 
 refDraw :: IORef DrawCallback -> DrawCallback
 refDraw ref d = liftIO (readIORef ref) >>= \cb -> cb d
 
 buildWidget :: (RenderState, ControlChan, DrawRef) -> Widget -> IO DrawCallback
-
-buildWidget (rs,_,ref) wd@Label { label_ = msg } = do
-  draw <- makeTextPainter rs wd
-  writeIORef ref $ draw [msg]
-  return $ refDraw ref
-
-buildWidget ctx@(rs,_,ref) wd@Latency {} = do
-  draw <- makeTextPainter rs wd
-  backChan <- newBoundedChan 1 :: IO (BoundedChan Char)
-  ts <- getCurrentTime
-  runThread ts $ \prev-> do
-    ts <- getCurrentTime
-    repaint ctx $ \d -> do
-      draw [show $ diffUTCTime ts prev] d
-      liftIO $ writeChan backChan '1'
-    _ <- readChan backChan
-    threadDelay 1
-    return ts
-  return $ refDraw ref
-
-buildWidget ctx@(rs,_,ref) wd@Clock {} = do
-  draw <- makeTextPainter rs wd
-  tz <- case tz_ wd of
-          LocalTimeZone -> localTimezone
-          OtherTimeZone z -> otherTimezone z
-  -- Cache expensive timezone computation
-  runStatelessThread $ do
-    msg <- formatClock (fmt_ wd) tz
-    repaint ctx $ draw [msg]
-    threadDelay 1000000
-  return $ refDraw ref
-
-buildWidget ctx@(rs,_,ref) wd@Title {} = do
-  draw <- makeTextPainter rs wd
-  thr <- myThreadId
-  let makeAction thr result = case result of
-        Left _ -> const $ liftIO $ killThread thr
-        Right msg -> draw [msg]
-  runStatelessThread $ makeAction thr <$> tryIOError getLine >>= repaint ctx
-  return $ refDraw ref
-
-buildWidget ctx@(_,_,ref) wd@CpuGraph {} = do
-  let readCPU = map read . tail. words . head . lines <$> readFully "/proc/stat"
-  cpu <- readCPU
-  let m cpu' = mkAutoM_ $ \_ -> do
-      cpu'' <- readCPU
-      let (user:nice:sys:idle:io:_) = zipWith (-) cpu'' cpu'
-      return ([sys + io, nice, user, idle], m cpu'')
-  buildGraphWidget ctx wd 3 (repeat 1.0) (m cpu)
-  return $ refDraw ref
-
-buildWidget ctx@(_,_,ref) wd@MemGraph {} = do
-  let m = mkAutoM_ $ \_ -> do
-      mem <- readBatteryFile "/proc/meminfo"
-      let [total,free,cached] = map (read . (mem !)) ["MemTotal", "MemFree", "Cached"]
-      return ([total - free - cached, total - free, total], m)
-  buildGraphWidget ctx wd 2 (0.0 : repeat 1.0) m
-  return $ refDraw ref
-
-buildWidget ctx@(_,_,ref) wd@NetGraph {netdev_ = netdev} = do
-  let f x = log (x + 1)
-      f2 x = f x * f x * f x
-  net <- fmap (map f2) <$> netState netdev
-  maxspeed <- fmap (f2 . (*100000000)) <$> deltaTime
-
-  let m net' maxspeed' = mkAutoM_ $ \_ -> do
-      ([inbound, outbound], net'') <- stepAuto net' ()
-      (maxs, maxspeed'') <- stepAuto maxspeed' ()
-      let out = map (truncate . max 0) [inbound, maxs - inbound - outbound, outbound, 0]
-      return (out, m net'' maxspeed'')
-  buildGraphWidget ctx wd 3 (repeat 1.0) (m net maxspeed)
-  return $ refDraw ref
 
 buildWidget ctx@(rs,_,ref) wd@CpuTop {refreshRate = refresh} = do
   draw <- makeTextPainter rs wd
@@ -564,6 +478,8 @@ buildWidget ctx@(rs,_,ref) wd@MemStatus {refreshRate = refresh} = do
       threadDelay $ round (1000000 * refresh)
   return $ refDraw ref
 
+buildWidget ctx _ = return $ const $ return ()
+
 deltaTime = do
   ts <- getCurrentTime
   let m ts' = mkAutoM_ $ \_ -> do
@@ -579,35 +495,13 @@ netState netdev = do
       return (inout, m net'')
   return (m net)
 
-buildGraphWidget ctx@(rs,_,ref) wd nlayers intervals sampler = do
-  let (attr, colors, refresh, tscale) = (attr_ wd, colorTable wd, refreshRate wd, timeScale_ wd)
-      WidgetAttributes sz pos  _ bg _ _ = attr
-      (Size ws hs, Size x0 y0) = (sz, pos)
-  let graph = makeGraph tscale ws nlayers
-  let colorTable = map toColor colors
-  let scale (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*hs)) vals
-  let samp = fmap (scale . reverse . tail . scanl (+) 0) sampler
-  let draw graph gd = withDrawWidget rs gd attr $ \d -> liftIO $ do
-        drawRect (display rs) d bg x0 y0 ws hs
-        let segments = ($!) map (map (makeSegment y0 hs) . filter ((/=0) . snd)
-                            . zip [x0+ws-1,x0+ws-2..]) . exportGraph $ graph
-        mapM_ (drawColorSegment rs) $ zip segments colorTable
-  writeIORef ref $ draw graph
+data GraphData = LinearGraph [[Int]] | LogGraph Int [[[Int]]]
 
-  runThread (intervals, samp, graph) $ \(ivals, samp', graph')-> do
-    threadDelay $ round (1000000 * refresh * head ivals)
-    (sample, samp'') <- stepAuto samp' ()
-    let graph'' = updateGraph graph' sample ws
-    repaint ctx $ draw graph''
-    return (tail ivals, samp'', graph'')
-
-data Graph = LinearGraph [[Int]] | LogGraph Int [[[Int]]]
-
-makeGraph :: TimeScale -> Int -> Int -> Graph
+makeGraph :: TimeScale -> Int -> Int -> GraphData
 makeGraph LinearTime ws l = LinearGraph $ replicate l $ replicate ws 0
 makeGraph (LogTime n) ws l = LogGraph n $ replicate l $ replicate (1 + ws `div` n) []
 
-updateGraph :: Graph -> [Int] -> Int -> Graph
+updateGraph :: GraphData -> [Int] -> Int -> GraphData
 updateGraph (LinearGraph g) s ws = LinearGraph $ map (\(n,o) -> n : take (ws-1) o) $ zip s g
 updateGraph (LogGraph n g) s ws = LogGraph n $ zipWith updateLayer g s where
   updateLayer [] _ = []
@@ -655,44 +549,25 @@ reserve wa wpos wsz ort =
       pos' = wpos + dir ort * newpos + plt
       in (WidgetAttributes sz' pos' p bg cmd tip, newpos)
 
-layoutWidget :: RenderState -> ControlChan -> Size -> Orientation -> Widget
-                -> StateT ([DrawableWidget], Size) IO ()
-layoutWidget rs ch wpos ort (Frame wa cort cwds) = do
-  (out, wsz) <- get
+layoutTooltip :: Maybe Tooltip -> Maybe Tooltip
+layoutTooltip Nothing = Nothing
+layoutTooltip (Just (Tooltip bg sz orien wds)) = Just $ Tooltip bg sz orien $ layoutWidgets orien sz wds
+
+layoutWidget :: Size -> Orientation -> Size -> Widget -> (Size, [Widget])
+layoutWidget wpos ort wsz (Frame wa cort cwds) =
   let (WidgetAttributes ws pos _ _ _ _, newpos) = reserve wa wpos wsz ort
-  put (out, ws)
-  mapM_ (layoutWidget rs ch pos cort) cwds
-  out' <- fst <$> get
-  put (out', newpos)
+      cwds' = concat $ snd $ mapAccumL (layoutWidget pos cort) ws cwds
+   in (newpos, cwds')
 
-layoutWidget rs ch wpos ort wd = do
-  (out, wsz) <- get
+layoutWidget wpos ort wsz wd =
   let (wa', newpos) = reserve (attr_ wd) wpos wsz ort
-      wd' = wd { attr_ = wa' }
-  liftIO $ print wa'
+      wa'' = wa' { mbtooltip = layoutTooltip $mbtooltip wa' }
+   in (newpos, [wd { attr_ = wa'' }])
 
-  ref <- liftIO $ newIORef $ const $ return ()
-  cb <- liftIO $ buildWidget (rs, ch, ref) wd'
-  put (DrawableWidget wd' cb : out, newpos)
+layoutWidgets :: Orientation -> Size -> [Widget] -> [Widget]
+layoutWidgets orien wsz =
+  concat . snd . mapAccumL (layoutWidget (Size 0 0) orien) wsz
 
-layoutWidgets :: RenderState -> ControlChan -> Size -> Orientation -> [Widget] -> IO [DrawableWidget]
-layoutWidgets rs ch wsz orien wds = do
-  (out, _) <- execStateT (mapM_ (layoutWidget rs ch (Size 0 0) orien) wds) ([], wsz)
-  print $ head out
-  return out
-
-paintWindow :: WindowState -> RW ()
-paintWindow (WindowState rs wds bg) = do
-  let RenderState { display = dpy, windowWidth = width,
-                    windowHeight = height } = rs
-  liftIconCache $ withDrawState rs $ \d -> do
-    liftIO $ printf "%d x %d\n" width height
-    liftIO $ drawRect dpy d bg 0 0 width height
-    mapM_ (draw $ Just d) wds
-    liftIO $ copyToWindow rs 0 0 (fi width) (fi height)
-    liftIO $ sync dpy False where
-      draw :: Maybe XftDraw -> DrawableWidget -> DrawCall ()
-      draw d (DrawableWidget _ cb) = cb d
 
 windowMapAndSelectInput :: Display -> Window -> Word64 -> IO ()
 windowMapAndSelectInput dpy w mask = do
@@ -700,131 +575,6 @@ windowMapAndSelectInput dpy w mask = do
   mapWindow dpy w
   sync dpy False
   flush dpy
-
-createTooltip :: RenderState -> Widget -> Tooltip -> RW ()
-createTooltip parent_rs pwd tip = do
-  deleteTooltip
-  let dpy = display parent_rs
-  let Tooltip tsz@(Size width height) orien widgets = tip
-
-  parent <- liftIO $ getWindowAttributes dpy (window parent_rs)
-  let WidgetAttributes sz pos _ _ _ _ = attr_ pwd
-  let wpos = Size (fi $ wa_x parent) (fi $ wa_y parent)
-  let place = if y_ wpos == 0
-                 then wpos + pos + sz * dir Vertical - half (tsz-sz) * dir Horizontal - Size 0 0
-                 else wpos + pos - half (tsz-sz) * dir Horizontal - tsz * dir Vertical + Size 0 0
-  let screenWidth = fi $ displayWidth dpy (screenNum parent_rs)
-  let x = max 0 $ min (x_ place) (screenWidth - width)
-
-  liftIO $ print $ "Enter! Creating Window " ++ show place ++ " wpos " ++ show wpos
-
-  let scr = screenNum parent_rs
-  let visual = defaultVisual dpy scr
-      attrmask = cWOverrideRedirect
-  w <- liftIO $ allocaSetWindowAttributes $ \attributes -> do
-         set_override_redirect attributes True
-         createWindow dpy (rootWindowOfScreen (screenOfDisplay dpy scr))
-                    (fi x) (fi $ y_ place)
-                    (fi width) (fi height) 0 copyFromParent
-                    inputOutput visual attrmask attributes
-
-  tooltopAtom <- liftIO $ internAtom dpy "_NET_WM_WINDOW_TYPE_TOOLTIP" False
-  winType <- liftIO $ internAtom dpy "_NET_WM_WINDOW_TYPE" False
-  liftIO $ changeProperty32 dpy w winType aTOM propModeReplace [fi tooltopAtom]
-
-  gc <- liftIO $ createGC dpy w
-  liftIO $ setLineAttributes dpy gc 1 lineSolid capRound joinRound
-
-  buf <- liftIO $ createPixmap dpy w (fi width) (fi height) (defaultDepth dpy scr)
-
-  liftIO $ windowMapAndSelectInput dpy w (structureNotifyMask .|. exposureMask)
-
-  let rs = RenderState dpy w buf gc width height (screenNum parent_rs)
-  ch <- reader controlChan
-  widgets' <- liftIO $ layoutWidgets rs ch (Size width height) orien widgets
-  get >>= \s -> put s { tooltip_ = Just $ WindowState rs widgets' tooltipBackground }
-
-deleteTooltip :: RW ()
-deleteTooltip = do
-  s <- get
-  let tip = tooltip_ s
-  -- TODO: use some function
-  case tip of
-    Nothing -> return ()
-    Just t -> do
-      liftIO $ print "Destroy tooltip"
-      liftIO $ destroyWindow (display . rs_ $ t) (window . rs_ $ t)
-      put s { tooltip_ = Nothing }
-
-condM_ :: [a] -> (a -> Bool) -> (a -> RW ()) -> RW ()
-condM_ t cond action = forM_ t (\a -> when (cond a) $ action a)
-
-allWindows = do
-  wins <- reader windows
-  tip <- tooltip_ <$> get
-  return $ maybeToList tip ++ wins
-
-inbounds :: WidgetAttributes -> Size -> Maybe Bool
-inbounds WidgetAttributes {size = (Size ws hs), position = (Size wx wy)} (Size x y) =
-        Just (x > wx && x < wx + ws && y > wy && y < wy + hs)
-
-updateTooltip :: Window -> Maybe Size -> RW ()
-updateTooltip ww next = do
-  prev <- mouse_ <$> get
-  get >>= \s -> put s { mouse_ = next }
-
-  let insideWA wa p = fromMaybe False (p >>= inbounds wa)
-  let inside wd = insideWA (attr_ wd)
-
-  let update rs (DrawableWidget wd _) =
-       update' (inside wd prev) (inside wd next) rs wd where
-        update' False True rs' wd' = do
-               liftIO $ print $ "Create tooltip requested: " ++ show wd'
-               forM_ (mbtooltip . attr_ $ wd') (createTooltip rs' wd')
-
-        update' True False _ _ = deleteTooltip
-        update' _ _ _ _ = return ()
-
-  wins <- reader windows
-  condM_ wins (\w -> (window . rs_ $ w) == ww) $ \win -> do
-      let WindowState rs wds _ = win
-      mapM_ (update rs) wds
-
-handleEvent :: Event -> RW ()
-handleEvent ExposeEvent { ev_window = w } = do
-  wins <- reader windows
-  tip <- tooltip_ <$> get
-  let allwins = maybeToList tip ++ wins
-  mapM_ (\win -> when (w == (window . rs_) win) $ paintWindow win) allwins
-
-handleEvent ClientMessageEvent {ev_data = 0:_} = do
-  (ch,_) <- reader controlChan
-  allWinIds <- map (window . rs_) <$> allWindows
-  liftIO (readChan ch) >>= \act -> liftIconCache $ act allWinIds Nothing
-
-handleEvent MotionEvent {ev_x = x, ev_y = y, ev_window = ww} = do
-  let next = Just $ Size (fi x) (fi y)
-  updateTooltip ww next
-
-handleEvent CrossingEvent {ev_event_type = typ,
-                           ev_window = ww,
-                           ev_x = x, ev_y = y } = do
-  let next = if typ == enterNotify then Just $ Size (fi x) (fi y) else Nothing
-  updateTooltip ww next
-
-handleEvent AnyEvent {ev_event_type = 14} = return () -- NoExpose
-
-handleEvent event@_ =
-  liftIO $ print $ "Unhandled event:" ++
-    eventName event ++ ": " ++ show event
-
-eventLoop :: Display -> ControlChan -> ROState -> RWState -> IO ()
-eventLoop dpy ch ro rw = do
-  rw' <- ($!) allocaXEvent $ \ev -> do
-    nextEvent dpy ev
-    event <- getEvent ev
-    runReaderT (execStateT (handleEvent event) rw) ro
-  eventLoop dpy ch ro rw'
 
 sendClientEvent :: Display -> Atom -> Window -> Atom -> IO ()
 sendClientEvent d a w val = do
@@ -835,80 +585,433 @@ sendClientEvent d a w val = do
     sync d False
 
 copyChanToX :: ControlChan -> Window -> IO ()
-copyChanToX (_,chan) w = do
+copyChanToX chan w = do
+  ch <- dupChan chan
   d <- openDisplay ""
   a <- internAtom d "BAR_UPDATE" False
   forever $ do
-     val <- readChan chan
-     sendClientEvent d a w val `catchIOError`  \x -> do
+     val <- readChan ch
+     sendClientEvent d a w 0 `catchIOError`  \x -> do
        print $ "Exception caught: " ++ show x
        sync d False
 
-makeBar :: Display -> ControlChan -> Bar -> StateT Bool IO WindowState
-makeBar dpy controlCh (Bar height scr gravity wds) = do
-  cc <- get
-  put False
-  liftIO $ do
-    let width = fi $ displayWidth dpy scr
-    let scrHeight = displayHeight dpy scr
+makeBar :: Display -> ControlChan -> Bar -> IO WindowState
+makeBar dpy controlCh (Bar bg height scr gravity wds) = do
+  let width = fi $ displayWidth dpy scr
+  let scrHeight = displayHeight dpy scr
 
-    -- left, right, top, bottom,
-    -- left_start_y, left_end_y, right_start_y, right_end_y,
-    -- top_start_x, top_end_x, bottom_start_x, bottom_end_x
-    let (y, strutValues) = if gravity == GravityTop
-        then (0, [0, 0, fi height, 0,
-                       0, 0, 0, 0,
-                       0, fi width, 0, 0])
-        else (fi scrHeight - height, [0, 0, 0, fi height,
-                       0, 0, 0, 0,
-                       0, 0, 0, fi width ])
+  -- left, right, top, bottom,
+  -- left_start_y, left_end_y, right_start_y, right_end_y,
+  -- top_start_x, top_end_x, bottom_start_x, bottom_end_x
+  let (y, strutValues) = if gravity == GravityTop
+      then (0, [0, 0, fi height, 0,
+                     0, 0, 0, 0,
+                     0, fi width, 0, 0])
+      else (fi scrHeight - height, [0, 0, 0, fi height,
+                     0, 0, 0, 0,
+                     0, 0, 0, fi width ])
 
-    w <- createWindow dpy (rootWindowOfScreen (screenOfDisplay dpy scr))
-                      0 (fi y) (fi width) (fi height)
-                      0 copyFromParent inputOutput (defaultVisual dpy scr) 0 nullPtr
-    gc <- createGC dpy w
-    buf <- createPixmap dpy w (fi width) (fi height) (defaultDepth dpy scr)
+  w <- createWindow dpy (rootWindowOfScreen (screenOfDisplay dpy scr))
+                    0 (fi y) (fi width) (fi height)
+                    0 copyFromParent inputOutput (defaultVisual dpy scr) 0 nullPtr
+  gc <- createGC dpy w
+  buf <- createPixmap dpy w (fi width) (fi height) (defaultDepth dpy scr)
 
-    let rs = RenderState { display = dpy, window = w, buffer = buf, gc_ = gc,
-                                   windowWidth = width, windowHeight = height,
-                                   screenNum = scr}
+  let rs = RenderState { display = dpy, window = w, buffer = buf, gc_ = gc,
+                         windowWidth = width, windowHeight = height,
+                         windowBackground = bg,
+                         screenNum = scr}
 
-    when cc $ void $ forkOS $ copyChanToX controlCh w
+  strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
+  changeProperty32 dpy w strutPartial cARDINAL propModeReplace strutValues
+  strut <- internAtom dpy "_NET_WM_STRUT" False
+  changeProperty32 dpy w strut cARDINAL propModeReplace (take 4 strutValues)
 
-    strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
-    changeProperty32 dpy w strutPartial cARDINAL propModeReplace strutValues
-    strut <- internAtom dpy "_NET_WM_STRUT" False
-    changeProperty32 dpy w strut cARDINAL propModeReplace (take 4 strutValues)
+  dockAtom <- internAtom dpy "_NET_WM_WINDOW_TYPE_DOCK" False
+  winType <- internAtom dpy "_NET_WM_WINDOW_TYPE" False
+  changeProperty32 dpy w winType aTOM propModeReplace [fi dockAtom]
 
-    dockAtom <- internAtom dpy "_NET_WM_WINDOW_TYPE_DOCK" False
-    winType <- internAtom dpy "_NET_WM_WINDOW_TYPE" False
-    changeProperty32 dpy w winType aTOM propModeReplace [fi dockAtom]
+  windowMapAndSelectInput dpy w $ exposureMask
+                              .|. structureNotifyMask
+                              .|. buttonPressMask
+                              .|. enterWindowMask
+                              .|. leaveWindowMask
+                              .|. pointerMotionMask
 
-    windowMapAndSelectInput dpy w $ exposureMask
-                                .|. structureNotifyMask
-                                .|. buttonPressMask
-                                .|. enterWindowMask
-                                .|. leaveWindowMask
-                                .|. pointerMotionMask
+  let widgets = layoutWidgets Horizontal (Size width height) wds
+  return $ WindowState rs widgets
 
-    widgets <- layoutWidgets rs controlCh (Size width height) Horizontal wds
-    return $ WindowState rs widgets barBackground
+------ FIXME: remove -------
+getRootTimerChangeEvents :: RootInput -> Maybe TimerCollectionInp
+getRootTimerChangeEvents (RTitle msg) = get' $ words msg where
+  sec = fromRational 1 :: NominalDiffTime
+  makeDt dt = fromIntegral (round $ dt * 1000000) * sec / 1000000
+  get' ("c":n:_) = Just $ TCChangeUsage [(makeDt $ read n, 1)]
+  get' ("d":n:_) = Just $ TCChangeUsage [(makeDt $ read n, -1)]
+  get' _         = Nothing
+getRootTimerChangeEvents _ = Nothing
+--------- cut here----------
+
+getMotionEvent :: RootInput -> Maybe (Window, Maybe Size)
+getMotionEvent (RMotion w pos) = Just (w, pos)
+getMotionEvent _ = Nothing
+
+getClickEvent :: RootInput -> Maybe (Window, Size)
+getClickEvent (RClick w pos) = Just (w, pos)
+getClickEvent _ = Nothing
+
+graphScale = 10000
+readCPU = map read . tail. words . head . lines <$> readFully "/proc/stat"
+
+createGraph :: (GraphDef,Int) -> Auto IO (Period, UTCTime) (Maybe (GraphDef, [[Int]]))
+createGraph defs@(GraphDef t _ _,_) = create defs (init defs) (sampler t) where
+  init (GraphDef typ tscale _, ws)= makeGraph tscale ws (layers typ)
+  layers Cpu = 3
+  layers (Net _) = 3
+  layers Mem = 2
+  layers Battery = 1
+  create d@(GraphDef t s p, ws) graph update = mkAutoM_ $ \(per, ts) ->
+    if per /= p then return (Nothing, create d graph update)
+                else create' d graph update ts
+  create' d@(def,ws) graph update ts = do
+    print ("update Graph ", def)
+    (sample, update') <- stepAuto update ts
+    let scale (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*graphScale)) vals
+    let sample' = scale . reverse . tail . scanl (+) 0 $ sample
+    let graph' = updateGraph graph sample' ws
+    return (Just (def, exportGraph graph'), create d graph' update')
+  sampler Cpu = mkAutoM_ $ \_ -> do
+    cpu <- readCPU
+    let sampleCpu cpu' = mkAutoM_ $ \_ -> do
+        cpu'' <- readCPU
+        let (user:nice:sys:idle:io:_) = zipWith (-) cpu'' cpu'
+        return ([sys + io, nice, user, idle], sampleCpu cpu'')
+    return ([0,0,0,1], sampleCpu cpu)
+  sampler Mem = mkAutoM_ $ \_ -> do
+    mem <- readBatteryFile "/proc/meminfo"
+    let [total,free,cached] = map (read . (mem !))
+           ["MemTotal", "MemFree", "Cached"]
+    return ([total - free - cached, total - free, total], sampler Mem)
+  sampler (Net netdev) = mkAutoM_ $ \_ -> do
+    let f x = log (x + 1)
+        f2 x = f x * f x * f x
+    net <- fmap (map f2) <$> netState netdev
+    maxspeed <- fmap (f2 . (*100000000)) <$> deltaTime
+    let m net' maxspeed' = mkAutoM_ $ \_ -> do
+        ([inbound, outbound], net'') <- stepAuto net' ()
+        (maxs, maxspeed'') <- stepAuto maxspeed' ()
+        let out = map (truncate . max 0)
+                  [inbound, maxs - inbound - outbound, outbound, 0]
+        return (out, m net'' maxspeed'')
+    return ([0,0,0], m net maxspeed)
+  sampler _ = mkAutoM_ $ \_ -> return ([0,0], sampler Mem)
+
+dump :: (Show a) => String -> Auto IO a ()
+dump msg = mkAutoM_ $ \inp -> do
+  print (msg, inp)
+  return ((), dump msg)
+
+mergeRect (Rectangle x0 y0 w0 h0) (Rectangle x1 y1 w1 h1) = Rectangle x y (fi w) (fi h)
+  where
+  calc a0 a1 b0 b1 = let (mn, mx) = (min a0 a1, max b0 b1) in (mn, mx - mn)
+  (x, w) = calc x0 x1 (x0+fi w0) (x1+fi w1)
+  (y, h) = calc y0 y1 (y0+fi h0) (y1+fi h1)
+
+combinePaints paints = M.elems $ foldr f M.empty paints where
+  f (rs, rect) = M.insertWith merge (window rs) (rs, rect)
+  merge (rs, rect1) (_, rect2) = (rs, mergeRect rect1 rect2)
+
+data ZEvent = ZNop | REv RootInput | TEv (Period, UTCTime)
+                   | GEv (GraphDef, [[Int]]) deriving Show
+
+createTooltip :: Display -> ControlChan ->  (Window, ScreenNumber)
+              -> Widget -> Tooltip
+              -> IO (WindowDraw, Window)
+createTooltip dpy ch (parent_w, parent_scr) pwd tip = do
+  let Tooltip bg tsz@(Size width height) orien widgets = tip
+
+  parent <- getWindowAttributes dpy parent_w
+  let WidgetAttributes sz pos _ _ _ _ = attr_ pwd
+  let wpos = Size (fi $ wa_x parent) (fi $ wa_y parent)
+  let place = if y_ wpos == 0
+                 then wpos + pos + sz * dir Vertical - half (tsz-sz) * dir Horizontal - Size 0 0
+                 else wpos + pos - half (tsz-sz) * dir Horizontal - tsz * dir Vertical + Size 0 0
+  let screenWidth = fi $ displayWidth dpy parent_scr
+  let x = max 0 $ min (x_ place) (screenWidth - width)
+
+  print $ "Enter! Creating Window " ++ show place ++ " wpos " ++ show wpos ++ " size " ++ show tsz
+
+  let visual = defaultVisual dpy parent_scr
+      attrmask = cWOverrideRedirect
+  w <- allocaSetWindowAttributes $ \attributes -> do
+         set_override_redirect attributes True
+         createWindow dpy (rootWindowOfScreen (screenOfDisplay dpy parent_scr))
+                    (fi x) (fi $ y_ place)
+                    (fi width) (fi height) 0 copyFromParent
+                    inputOutput visual attrmask attributes
+
+  tooltopAtom <- internAtom dpy "_NET_WM_WINDOW_TYPE_TOOLTIP" False
+  winType <- internAtom dpy "_NET_WM_WINDOW_TYPE" False
+  changeProperty32 dpy w winType aTOM propModeReplace [fi tooltopAtom]
+
+  gc <- createGC dpy w
+  setLineAttributes dpy gc 1 lineSolid capRound joinRound
+
+  buf <- createPixmap dpy w (fi width) (fi height) (defaultDepth dpy parent_scr)
+
+  windowMapAndSelectInput dpy w (structureNotifyMask .|. exposureMask)
+
+  let rs = RenderState dpy w buf gc width height bg parent_scr
+  let autos = bgWidget rs : map (makeWidget (rs,ch)) widgets
+  let res = proc x -> do
+      dump "Tip evt" -< x
+      id <<< zipAuto ZNop autos -< repeat x
+  return (res, w)
+
+updateTooltip :: Display -> ControlChan -> Maybe Window
+              -> Auto IO (Maybe ((Window, ScreenNumber), Widget))
+                         (Maybe WindowDraw)
+updateTooltip dpy ch oldw = mkAutoM_ $ \inp -> do
+  forM_ oldw (\w -> print "destroy" >> destroyWindow dpy w)
+  case inp of
+    Nothing       -> return (Nothing, updateTooltip dpy ch Nothing)
+    Just (winScr, wd) ->
+      case mbtooltip $ attr_ wd of
+        Nothing -> return (Nothing, updateTooltip dpy ch Nothing)
+        Just tip -> do
+          (tip, neww) <- createTooltip dpy ch winScr wd tip
+          return (Just tip, updateTooltip dpy ch $ Just neww)
+
+tooltipContainer :: Maybe WindowDraw
+                 -> Auto IO (Blip (Maybe WindowDraw), [ZEvent], [ZEvent]) [DrawResult]
+tooltipContainer mbtip = mkAutoM_ $ \(newtip, initevts, evts) -> do
+  (initres, mbtip') <- case newtip of
+         Blip (Just t) -> step t initevts []
+         Blip Nothing -> return ([], Nothing)
+         _ -> return ([], mbtip)
+  case mbtip' of
+      Nothing -> return ([], tooltipContainer Nothing)
+      Just tip -> do
+        (res, mbtip'') <- step tip evts []
+        return (initres ++ res, tooltipContainer mbtip'')
+  where
+    step :: WindowDraw -> [ZEvent] -> [[DrawResult]]
+         -> IO ([DrawResult], Maybe WindowDraw)
+    step tip [] out = return (concat out, Just tip)
+    step tip (e:xs) out = do
+      (v, tip') <- stepAuto tip e
+      step tip' xs (v : out)
+
+dataTask :: Display -> RootChan -> ((Window, Maybe Size) -> Maybe ((Window, ScreenNumber), Widget))
+                    -> [Auto IO (Period, UTCTime) (Maybe (GraphDef, [[Int]]))]
+                    -> [WidgetDraw]
+                    -> Auto IO RootInput ()
+dataTask dpy ch mouse graphs widgets = proc evt -> do
+    -- dump "Event === " -< evt
+
+    tooltipChangeReq <- onChange_ <<< holdWith_ Nothing
+                    <<< modifyBlips mouse
+                    <<< emitJusts getMotionEvent -< evt
+    -- dump "Tooltip === " -< tooltipChangeReq
+    tooltipChange <- perBlip (updateTooltip dpy ch Nothing) -< tooltipChangeReq
+
+    changeTimerBlip <- emitJusts getRootTimerChangeEvents -< evt -- FIXME: remove timer debug
+    timerBlip <- onJusts <<< arrM getRootTickEvents -< evt
+
+    let timerCollectBlips = mergeL changeTimerBlip timerBlip
+    timerCollectionEvts <- fromBlips TCNop -< timerCollectBlips
+    timerEvts <- timerTask ch -< timerCollectionEvts
+    -- accelOverList $ dump "Timers === " -< timerEvts
+    dataBlips <- accelOverList $ zipAuto dummy graphs -< map repeat timerEvts
+    let graphChanges :: [(GraphDef, [[Int]])]
+        graphChanges = catMaybes . concat $ dataBlips
+    latestGraphs <- map GEv . M.toList <$> accum_ (M.unionWith (curry snd)) M.empty -< M.fromList graphChanges
+    -- accelOverList $ dump "Graphs changes === " -< graphChanges
+    let zevts = (REv evt : map GEv graphChanges) ++ map TEv timerEvts
+    -- accelOverList $ dump "Paint input === " -< zevts
+    paints <- accelOverList $ zipAuto ZNop widgets -< map repeat zevts
+    tipPaints <- tooltipContainer Nothing -< (tooltipChange, latestGraphs, zevts)
+
+    let rect = combinePaints . catMaybes $ concat paints ++ tipPaints
+    -- accelOverList $ dump "Rectangles === " -< rect
+    accelOverList (mkFuncM updateWindow) -< rect
+    -- id -< concat dataBlips
+    id -< ()
+  where
+    dummy = (1, epoch)
+    updateGraphSet st inp = S.union st $ S.fromList inp
+    updateWindow (RenderState {display = dpy, buffer = buf, window = w, gc_ = gc},
+                  Rectangle x y width height) = do
+      copyArea dpy buf w gc (fi x) (fi y) (fi width) (fi height) (fi x) (fi y)
+      sync dpy False
+
+getBounds wd =
+  let WidgetAttributes sz pos  _ _ _ _ = attr_ wd
+  -- FIXME: use Word32 for dimensions?
+  in Rectangle (fi $ x_ pos) (fi $ y_ pos) (fi $ x_ sz) (fi $ y_ sz)
+
+myCache f = mkAutoM_ $ \_ -> do
+  v <- f
+  return (v, mkConst v)
+
+mkDrawStringWidget :: RenderState -> Widget -> Auto IO [String] (RenderState, Rectangle)
+mkDrawStringWidget rs@RenderState { display = dpy } wd = proc strings -> do
+  -- FIXME cache_ didn't work
+    fn <- myCache (makeFont rs $ tattr_ wd) -< ()
+    draw -< (fn, strings)
+  where
+    WidgetAttributes (Size ws hs) (Size x y) _ wbg _ _ = attr_ wd
+    draw :: Auto IO (XftFont, [String]) (RenderState, Rectangle)
+    draw = mkAutoM_ $ \inp -> makeIconCache dpy >>= \icons -> draw' icons inp
+    draw' icons (fn, strings) = do
+      print ("Draw Strings: ", strings)
+      (icons', _) <- withDraw rs $ \d -> do
+        xftDrawSetClipRectangles d 0 0 [Rectangle (fi x) (fi y) (fi ws) (fi hs)]
+        drawRect (display rs) d wbg x y ws hs
+        foldM (drawMessages rs (attr_ wd) (tattr_ wd) fn d) (icons, 0) strings
+      return ((rs, getBounds wd), mkAutoM_ $ draw' icons')
+
+data Pin a = InOut a | Out deriving Show
+
+lastIn v (InOut s) = s
+lastIn v Out = v
+
+wrapAction :: a
+           -> (ZEvent -> Maybe (Pin a))
+           -> Auto IO a (RenderState, Rectangle)
+           -> WidgetDraw
+wrapAction dflt narrow action = proc ev -> do
+  v <- accumB_ lastIn dflt <<< mapMaybeB narrow -< Blip ev
+  id <<< asMaybes <<< perBlip action -< v
+
+type DrawResult = Maybe (RenderState, Rectangle)
+type WidgetDraw = Auto IO ZEvent DrawResult
+type WindowDraw = Auto IO ZEvent [DrawResult]
+
+bgWidget rs = wrapAction () narrow paint' where
+  narrow (REv (RExpose w)) | w == window rs  = Just Out
+  narrow _     = Nothing 
+  paint' = effect $ do
+    let RenderState dpy ww b gc w h bg _ = rs
+    withDraw rs $ \d -> drawRect dpy d bg 0 0 w h
+    return (rs, Rectangle 0 0 (fi w) (fi h))
+
+makeWidget :: (RenderState, ControlChan) -> Widget -> WidgetDraw
+makeWidget (rs,_) wd@Title {} = wrapAction [""] narrow (mkDrawStringWidget rs wd)where
+    narrow (REv (RTitle s)) = Just $ InOut [s]
+    narrow (REv (RExpose w)) | w == window rs  = Just Out
+    narrow _     = Nothing 
+
+makeWidget (rs,_) wd@Clock { refreshRate = rate } = wrapAction epoch narrow make where
+  narrow (TEv (ival, t)) | ival == rate = Just $ InOut t
+  narrow (REv (RExpose w)) | w == window rs  = Just Out
+  narrow _     = Nothing 
+  make = proc t -> do
+    tz <- myCache (case tz_ wd of
+          LocalTimeZone -> localTimezone
+          OtherTimeZone z -> otherTimezone z) -< ()
+    -- FIXME: ignores s
+    s <- mkFuncM (formatClock (fmt_ wd)) -< tz
+    res <- mkDrawStringWidget rs wd -< [s]
+    id -< res
+
+makeWidget (rs,_) wd@Label { label_ = msg } = wrapAction [msg] narrow (mkDrawStringWidget rs wd) where
+    narrow (REv (RExpose w)) | w == window rs  = Just Out
+    narrow _     = Nothing 
+   
+makeWidget (rs,_) wd@(Graph attr def colors) = wrapAction [] narrow painter where
+    narrow (GEv (def', grdata)) | def == def'  = Just $ InOut grdata
+    narrow (REv (RExpose w))  | w == window rs  = Just Out
+    narrow _     = Nothing 
+    painter = mkAutoM_ $ \grdata -> do
+      let WidgetAttributes sz pos  _ bg _ _ = attr
+          (Size ws hs, Size x0 y0) = (sz, pos)
+      let scale = graphScale `div` hs
+      let samp = map (map (`div` scale)) grdata
+      let colorTable = map toColor colors
+      -- print ("Paint Graph", def, samp)
+      withDraw rs $ \d -> do
+        drawRect (display rs) d bg x0 y0 ws hs
+        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
+                            . zip [x0+ws-1,x0+ws-2..]) samp
+        -- print ("Paint Graph", segments, samp)
+        mapM_ (drawColorSegment rs) $ zip segments colorTable
+      -- FIXME: update only changed part
+      return ((rs, getBounds wd), painter)
+
+makeWidget ctx wd = proc ev -> do
+  dump "makeWidget" -< ev
+  id -< Nothing
+
+extractGraphs (Graph attr graph _) = [(graph, x_ $ size attr)]
+extractGraphs _ = []
+
+extractAllGraphs wd = extractGraphs wd ++ fromTooltip where
+  fromTooltip = case mbtooltip $ attr_ wd of
+      Nothing -> []
+      Just (Tooltip _ _ _ wds) -> concatMap extractGraphs wds
+
+inbounds :: WidgetAttributes -> Size -> Bool
+inbounds WidgetAttributes {size = (Size ws hs), position = (Size wx wy)} (Size x y) =
+  x > wx && x < wx + ws && y > wy && y < wy + hs
+
+mouseHitWds :: [Widget] -> Size -> Maybe Widget
+mouseHitWds wds pos =
+  let match wd = inbounds (attr_ wd) pos 
+   in find match wds
+
+mouseHitWins :: [WindowState] -> (Window, Maybe Size) -> Maybe ((Window, ScreenNumber), Widget)
+mouseHitWins wins (w, Nothing) = Nothing
+mouseHitWins wins (w, Just pos) =
+  let matchWin (WindowState rs _) = w == window rs
+      matchWds (WindowState rs wds) = mouseHitWds wds pos >>= \wd -> Just ((window rs, screenNum rs), wd)
+   in find matchWin wins >>= matchWds
+
+initRootTask :: Display -> ControlChan -> [WindowState] -> IO(Auto IO RootInput ())
+initRootTask dpy ch wins = do
+  forkIO $ forever $ do
+    line <- getLine
+    writeChan ch (RTitle line)
+  let graphs = map createGraph $ concatMap extractAllGraphs $ concatMap getWidgets wins
+      mouse = mouseHitWins wins
+      widgets = concatMap mkWindow wins
+  return $ dataTask dpy ch mouse graphs widgets where
+        getWidgets (WindowState _ wds) = wds
+        getWidgetAndRs (WindowState rs wds) = zip wds (repeat rs)
+        mkWindow (WindowState rs wds) = bgWidget rs : map (makeWidget (rs,ch)) wds
+
+
+eventLoop2 dpy ch auto = do
+  rootEv <- ($!) allocaXEvent $ \ev -> do
+    nextEvent dpy ev
+    event <- getEvent ev
+    case event of
+       ClientMessageEvent {ev_data = 0:_} -> liftIO $ readChan ch
+       ExposeEvent { ev_window = w } ->      return $ RExpose w
+       MotionEvent {ev_x = x, ev_y = y, ev_window = ww} ->
+         return $ RMotion ww $ Just (Size (fi x) (fi y))
+       
+       ev@CrossingEvent {ev_x = x, ev_y = y, ev_window = ww} ->
+         if ev_event_type ev == enterNotify
+            then return $ RMotion ww $ Just (Size (fi x) (fi y))
+            else return $ RMotion ww Nothing
+       _ -> return RNop
+  (_, auto') <- stepAuto auto rootEv
+  eventLoop2 dpy ch auto'
 
 main :: IO ()
 main = do
   xSetErrorHandler
   dpy <- openDisplay ""
   -- FIXME: increase to improve throughput?
-  controlCh <- newBoundedChan 1
-  signalCh <- newBoundedChan 1
-  let ch = (controlCh, signalCh)
+  controlCh <- newChan
 
-  wins <- evalStateT (mapM (makeBar dpy ch) bars) True
-  icons <- makeIconCache dpy
+  wins <- mapM (makeBar dpy controlCh) bars
 
-  let ro = ROState { windows = wins, controlChan = ch}
-  let rw = RWState { tooltip_ = Nothing, mouse_ = Nothing, iconCache_ = icons }
+  let WindowState firstRs _ = head wins
+  forkOS $ copyChanToX controlCh $ window firstRs
 
-  eventLoop dpy ch ro rw
+  auto <- initRootTask dpy controlCh wins
+  eventLoop2 dpy controlCh auto
   return ()
 

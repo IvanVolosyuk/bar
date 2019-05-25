@@ -6,6 +6,7 @@ module DzenParse (
   ) where
 
 import Data.Map()
+import Graphics.X11.Xlib (Window)
 import Text.ParserCombinators.Parsec
 
 dzenMsg :: String
@@ -20,7 +21,7 @@ parseLine input = do
 
 data ColorType = Foreground | Background
 type MbColor = Maybe String
-data Message = Text MbColor MbColor String | IconRef Int deriving Show
+data Message = Text MbColor MbColor String | IconRef Window deriving Show
 
 parseColorType :: GenParser Char st ColorType
 parseColorType = (string "fg" >> return Foreground) <|> (string "bg" >> return Background)
