@@ -74,9 +74,8 @@ bar1 = Bar barBackground barHeight {-screen-} 0 GravityBottom [
             clockTooltip,
         logtm cpu # cpuTooltip2,
         label # Message "foo" # Width 50,
-        logtm cpu # cpuTooltip2,
         logtm mem # memTooltip2,
-        net "brkvm",
+        logtm (net "brkvm"),
 
         title # LeftPadding 2 # RightPadding 2 #
                 BackgroundColor barBackground #
@@ -129,7 +128,7 @@ netTooltip netdev = Tooltip tooltipBackground (Size 400 (2*barHeight)) Horizonta
      tooltip (tooltipNet netdev) #RefreshRate 0.1 #LinearTime # Width 20
      ]
 
-logtm w = w # LogTime 8 # Width 129 # RefreshRate 1 -- One week worth of data
+logtm w = w # LogTime 8 # Width 129 # RefreshRate 0.05 -- One week worth of data
 
 tooltip w = w #BackgroundColor "#FFFFC0"
               #TopPadding 0 #BottomPadding 1 #LeftPadding 0 #RightPadding 1
@@ -495,25 +494,29 @@ netState netdev = do
       return (inout, m net'')
   return (m net)
 
-data GraphData = LinearGraph [[Int]] | LogGraph Int [[[Int]]]
+data GraphSample = GraphSample { sample :: ![Int] } deriving Show
+data GraphData = LinearGraph ![GraphSample] | LogGraph Int ![[GraphSample]] deriving Show
 
 makeGraph :: TimeScale -> Int -> Int -> GraphData
-makeGraph LinearTime ws l = LinearGraph $ replicate l $ replicate ws 0
-makeGraph (LogTime n) ws l = LogGraph n $ replicate l $ replicate (1 + ws `div` n) []
+makeGraph LinearTime ws l = LinearGraph $ replicate ws $ GraphSample $ replicate l 0
+makeGraph (LogTime n) ws l = LogGraph n $ replicate (1 + ws `div` n) []
 
-updateGraph :: GraphData -> [Int] -> Int -> GraphData
-updateGraph (LinearGraph g) s ws = LinearGraph $ map (\(n,o) -> n : take (ws-1) o) $ zip s g
-updateGraph (LogGraph n g) s ws = LogGraph n $ zipWith updateLayer g s where
+avgSamp :: [GraphSample] -> GraphSample -- (a + b + 1) /2
+avgSamp ar = GraphSample $ map (\v -> (sum v + 1) `div` length v) $ transpose $ map (\(GraphSample s) -> s) ar
+
+updateGraph ws (LinearGraph g) s = LinearGraph $ s : take ws g
+updateGraph ws (LogGraph n g) s = ($!) LogGraph n $ updateLayer g s where
+  updateLayer :: [[GraphSample]] -> GraphSample -> [[GraphSample]]
   updateLayer [] _ = []
   updateLayer (vv:xs) v
-    | length vv == (n+2) = let (a,b) = splitAt n vv in (v:a):updateLayer xs ((1 + sum b) `div` length b)
+    | length vv == (n+2) = let (a,b) = splitAt n vv in (v:a):updateLayer xs (avgSamp b)
     | otherwise = (v:vv):xs
 
-exportGraph (LinearGraph g) = g
-exportGraph (LogGraph n g) = map (concatMap (take' n)) g where
+exportGraph (LinearGraph g) = transpose $ map (\(GraphSample s) -> s) g
+exportGraph (LogGraph n g) = transpose $ map (\(GraphSample s) -> s) $ concatMap (take' n) g where
   take' n arr = let (a,b) = splitAt (n-1) arr in a ++ (case b of
        [] -> []
-       _ -> [(sum b + length b - 1) `div` length b])
+       _ -> [avgSamp b])
 
 readBatteryFile = readKeyValueFile $ head . words
 readNetFile = readKeyValueFile $ map read . words
@@ -663,48 +666,84 @@ getClickEvent _ = Nothing
 graphScale = 10000
 readCPU = map read . tail. words . head . lines <$> readFully "/proc/stat"
 
-createGraph :: (GraphDef,Int) -> Auto IO (Period, UTCTime) (Maybe (GraphDef, [[Int]]))
+step a = do
+  (_, a') <- stepAuto a (1, epoch)
+  step a'
+
+main2 = do
+  let g = createGraph (GraphDef Cpu LinearTime 1, 200)
+  step g
+
+run v = do
+  v' <- ($!) return $ updateGraph 200 v (GraphSample [1,2,3,4])
+  ($!) run v'
+
+main3 :: IO ()
+main3 = do
+  let v = LinearGraph $ replicate 200 $ GraphSample [1,2,3,4]
+  ($!) run v
+
+createGraph :: (GraphDef,Int) -> Auto IO (Period, UTCTime) (Maybe (GraphDef, GraphData))
+createGraph (def@(GraphDef Cpu tscale period), ws) = proc t -> do
+    matchPeriod <- emitOn (period ==) -< fst t
+    sample <- perBlip getSample -< matchPeriod
+    sample2 <- dropB 1 -< sample -- drop initial bad sample
+    graph <- perBlip getGraph -< fmap GraphSample sample2
+    id <<< asMaybes -< fmap (\x -> (def, x)) graph
+  where
+    layers Cpu = 3
+    layers (Net _) = 3
+    layers Mem = 2
+    layers Battery = 1
+
+    scale (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*graphScale)) vals
+
+    f n o =
+      let (user:nice:sys:idle:io:_) = ($!) zipWith (-) n o
+       in ([sys + io, nice, user, idle], n)
+
+    getSample = proc t -> do
+      sample <- mkState f [0,0,0] <<< effect readCPU -< t
+      id -< scale . reverse . tail . scanl (+) 0 $ sample
+
+    getGraph = proc samp -> do
+      id <<< seqer <<< accum_ (updateGraph ws) (makeGraph tscale ws (layers Cpu)) -< samp
+
+createGraph _ = mkConst Nothing
+
+  {-
 createGraph defs@(GraphDef t _ _,_) = create defs (init defs) (sampler t) where
   init (GraphDef typ tscale _, ws)= makeGraph tscale ws (layers typ)
   layers Cpu = 3
   layers (Net _) = 3
   layers Mem = 2
   layers Battery = 1
-  create d@(GraphDef t s p, ws) graph update = mkAutoM_ $ \(per, ts) ->
-    if per /= p then return (Nothing, create d graph update)
-                else create' d graph update ts
-  create' d@(def,ws) graph update ts = do
-    print ("update Graph ", def)
-    (sample, update') <- stepAuto update ts
-    let scale (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*graphScale)) vals
-    let sample' = scale . reverse . tail . scanl (+) 0 $ sample
-    let graph' = updateGraph graph sample' ws
-    return (Just (def, exportGraph graph'), create d graph' update')
-  sampler Cpu = mkAutoM_ $ \_ -> do
+  sampler Cpu = ($!) mkAutoM_ $ \_ -> do
     cpu <- readCPU
-    let sampleCpu cpu' = mkAutoM_ $ \_ -> do
+    let sampleCpu cpu' = ($!) mkAutoM_ $ \_ -> do
         cpu'' <- readCPU
-        let (user:nice:sys:idle:io:_) = zipWith (-) cpu'' cpu'
-        return ([sys + io, nice, user, idle], sampleCpu cpu'')
-    return ([0,0,0,1], sampleCpu cpu)
-  sampler Mem = mkAutoM_ $ \_ -> do
-    mem <- readBatteryFile "/proc/meminfo"
-    let [total,free,cached] = map (read . (mem !))
+        let (user:nice:sys:idle:io:_) = ($!) zipWith (-) cpu'' cpu'
+        ($!) return ([sys + io, nice, user, idle], ($!) sampleCpu cpu'')
+    ($!) return ([0,0,0,1], ($!) sampleCpu cpu)
+  sampler Mem = ($!) mkAutoM_ $ \_ -> do
+    mem <- ($!) readBatteryFile "/proc/meminfo"
+    let [total,free,cached] = ($!) map (read . (mem !))
            ["MemTotal", "MemFree", "Cached"]
-    return ([total - free - cached, total - free, total], sampler Mem)
-  sampler (Net netdev) = mkAutoM_ $ \_ -> do
+    ($!) return ([total - free - cached, total - free, total], ($!) sampler Mem)
+  sampler (Net netdev) = ($!) mkAutoM_ $ \_ -> do
     let f x = log (x + 1)
         f2 x = f x * f x * f x
-    net <- fmap (map f2) <$> netState netdev
-    maxspeed <- fmap (f2 . (*100000000)) <$> deltaTime
-    let m net' maxspeed' = mkAutoM_ $ \_ -> do
-        ([inbound, outbound], net'') <- stepAuto net' ()
-        (maxs, maxspeed'') <- stepAuto maxspeed' ()
+    net <- ($!) fmap (map f2) <$> netState netdev
+    maxspeed <- ($!) fmap (f2 . (*100000000)) <$> deltaTime
+    let m net' maxspeed' = ($!) mkAutoM_ $ \_ -> do
+        ([inbound, outbound], net'') <- ($!) stepAuto (seqer <<< net') ()
+        (maxs, maxspeed'') <- ($!) stepAuto (seqer <<< maxspeed') ()
         let out = map (truncate . max 0)
                   [inbound, maxs - inbound - outbound, outbound, 0]
-        return (out, m net'' maxspeed'')
-    return ([0,0,0], m net maxspeed)
-  sampler _ = mkAutoM_ $ \_ -> return ([0,0], sampler Mem)
+        ($!) return (out, ($!) m net'' maxspeed'')
+    ($!) return ([0,0,0], ($!) m net maxspeed)
+  sampler _ = ($!) mkAutoM_ $ \_ -> ($!) return ([0,0], ($!) sampler Mem)
+  -}
 
 dump :: (Show a) => String -> Auto IO a ()
 dump msg = mkAutoM_ $ \inp -> do
@@ -721,8 +760,8 @@ combinePaints paints = M.elems $ foldr f M.empty paints where
   f (rs, rect) = M.insertWith merge (window rs) (rs, rect)
   merge (rs, rect1) (_, rect2) = (rs, mergeRect rect1 rect2)
 
-data ZEvent = ZNop | REv RootInput | TEv (Period, UTCTime)
-                   | GEv (GraphDef, [[Int]]) deriving Show
+data ZEvent = ZNop | REv !RootInput | TEv !(Period, UTCTime)
+                   | GEv !(GraphDef, GraphData) deriving Show
 
 createTooltip :: Display -> ControlChan ->  (Window, ScreenNumber)
               -> Widget -> Tooltip
@@ -799,11 +838,11 @@ tooltipContainer mbtip = mkAutoM_ $ \(newtip, initevts, evts) -> do
          -> IO ([DrawResult], Maybe WindowDraw)
     step tip [] out = return (concat out, Just tip)
     step tip (e:xs) out = do
-      (v, tip') <- stepAuto tip e
+      (v, tip') <- ($!) stepAuto (seqer <<< tip) e
       step tip' xs (v : out)
 
 dataTask :: Display -> RootChan -> ((Window, Maybe Size) -> Maybe ((Window, ScreenNumber), Widget))
-                    -> [Auto IO (Period, UTCTime) (Maybe (GraphDef, [[Int]]))]
+                    -> [Auto IO (Period, UTCTime) (Maybe (GraphDef, GraphData))]
                     -> [WidgetDraw]
                     -> Auto IO RootInput ()
 dataTask dpy ch mouse graphs widgets = proc evt -> do
@@ -823,9 +862,9 @@ dataTask dpy ch mouse graphs widgets = proc evt -> do
     timerEvts <- timerTask ch -< timerCollectionEvts
     -- accelOverList $ dump "Timers === " -< timerEvts
     dataBlips <- accelOverList $ zipAuto dummy graphs -< map repeat timerEvts
-    let graphChanges :: [(GraphDef, [[Int]])]
+    let graphChanges :: [(GraphDef, GraphData)]
         graphChanges = catMaybes . concat $ dataBlips
-    latestGraphs <- map GEv . M.toList <$> accum_ (M.unionWith (curry snd)) M.empty -< M.fromList graphChanges
+    latestGraphs <- map GEv . M.toList <$> accum_ (foldr (\(k,v) m -> M.insert k v m)) M.empty -< graphChanges
     -- accelOverList $ dump "Graphs changes === " -< graphChanges
     let zevts = (REv evt : map GEv graphChanges) ++ map TEv timerEvts
     -- accelOverList $ dump "Paint input === " -< zevts
@@ -919,7 +958,7 @@ makeWidget (rs,_) wd@Label { label_ = msg } = wrapAction [msg] narrow (mkDrawStr
     narrow (REv (RExpose w)) | w == window rs  = Just Out
     narrow _     = Nothing 
    
-makeWidget (rs,_) wd@(Graph attr def colors) = wrapAction [] narrow painter where
+makeWidget (rs,_) wd@(Graph attr def colors) = wrapAction (LinearGraph []) narrow painter where
     narrow (GEv (def', grdata)) | def == def'  = Just $ InOut grdata
     narrow (REv (RExpose w))  | w == window rs  = Just Out
     narrow _     = Nothing 
@@ -927,7 +966,7 @@ makeWidget (rs,_) wd@(Graph attr def colors) = wrapAction [] narrow painter wher
       let WidgetAttributes sz pos  _ bg _ _ = attr
           (Size ws hs, Size x0 y0) = (sz, pos)
       let scale = graphScale `div` hs
-      let samp = map (map (`div` scale)) grdata
+      let samp = map (map (`div` scale)) $ exportGraph grdata
       let colorTable = map toColor colors
       -- print ("Paint Graph", def, samp)
       withDraw rs $ \d -> do
@@ -981,7 +1020,7 @@ initRootTask dpy ch wins = do
         mkWindow (WindowState rs wds) = bgWidget rs : map (makeWidget (rs,ch)) wds
 
 
-eventLoop2 dpy ch auto = do
+eventLoop dpy ch auto = do
   rootEv <- ($!) allocaXEvent $ \ev -> do
     nextEvent dpy ev
     event <- getEvent ev
@@ -997,10 +1036,12 @@ eventLoop2 dpy ch auto = do
             else return $ RMotion ww Nothing
        _ -> return RNop
   (_, auto') <- stepAuto auto rootEv
-  eventLoop2 dpy ch auto'
+  eventLoop dpy ch auto'
 
 main :: IO ()
 main = do
+  --main3
+  -- main2
   xSetErrorHandler
   dpy <- openDisplay ""
   -- FIXME: increase to improve throughput?
@@ -1012,6 +1053,9 @@ main = do
   forkOS $ copyChanToX controlCh $ window firstRs
 
   auto <- initRootTask dpy controlCh wins
-  eventLoop2 dpy controlCh auto
+  (_, auto1) <- stepAuto auto $ RTitle "c 0.05"
+  (_, auto2) <- stepAuto auto1 $ RTitle "c 0.1"
+  (_, auto3) <- stepAuto auto2 $ RTitle "c 1"
+  eventLoop dpy controlCh auto3
   return ()
 

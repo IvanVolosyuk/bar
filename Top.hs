@@ -56,7 +56,7 @@ makeCpuDiff newCpuInfo cpuInfo sec = do
   let active = filter ( (/= 0) . snd) diff
   print $ show active
   let sorted = take 3 . sortBy (flip compare `on` snd) $ active
-  return $ map output sorted where
+  ($!) return $! map output sorted where
     output (name, val) = printf "   %2d%% - %s" (perSec sec val) name
 
 readFiles [] = return []
@@ -75,11 +75,11 @@ pickProcValues selector = do
   x <- getDirectoryContents "/proc"
   let pids = map (printf "/proc/%s/stat") $ filter (isDigit . head) x :: [String]
   files <- readFiles pids
-  return $! map (valuePicker selector) files
+  ($!) return $! map (valuePicker selector) files
 
 memInfo = do
   mem <- pickProcValues memSelector :: IO [(String, (String, Int))]
-  return $! map display . take 6 . sortBy (flip compare `on` snd) . map snd $ mem where
+  ($!) return $! map display . take 6 . sortBy (flip compare `on` snd) . map snd $ mem where
     display (name, val) = printf " %7s - %s" (bytes val) name :: String
   
 
