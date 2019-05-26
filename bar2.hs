@@ -479,13 +479,14 @@ buildWidget ctx@(rs,_,ref) wd@MemStatus {refreshRate = refresh} = do
 
 buildWidget ctx _ = return $ const $ return ()
 
+-- FIXME: remove
 deltaTime = do
   ts <- getCurrentTime
   let m ts' = mkAutoM_ $ \_ -> do
       ts'' <- getCurrentTime
       return (getDt ts'' ts', m ts'')
   return $ m ts
-
+-- FIXME: remove
 netState netdev = do
   net <- readNetFile "/proc/net/dev"
   let m net' = mkAutoM_ $ \_ -> do
@@ -683,67 +684,65 @@ main3 = do
   let v = LinearGraph $ replicate 200 $ GraphSample [1,2,3,4]
   ($!) run v
 
-createGraph :: (GraphDef,Int) -> Auto IO (Period, UTCTime) (Maybe (GraphDef, GraphData))
-createGraph (def@(GraphDef Cpu tscale period), ws) = proc t -> do
-    matchPeriod <- emitOn (period ==) -< fst t
-    sample <- perBlip getSample -< matchPeriod
-    sample2 <- dropB 1 -< sample -- drop initial bad sample
-    graph <- perBlip getGraph -< fmap GraphSample sample2
-    id <<< asMaybes -< fmap (\x -> (def, x)) graph
-  where
-    layers Cpu = 3
-    layers (Net _) = 3
-    layers Mem = 2
-    layers Battery = 1
 
-    scale (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*graphScale)) vals
+layers Cpu = 3
+layers (Net _) = 3
+layers Mem = 2
+layers Battery = 1
 
-    f n o =
-      let (user:nice:sys:idle:io:_) = ($!) zipWith (-) n o
-       in ([sys + io, nice, user, idle], n)
+drops Mem = 0
+drops _ = 1
 
-    getSample = proc t -> do
-      sample <- mkState f [0,0,0] <<< effect readCPU -< t
-      id -< scale . reverse . tail . scanl (+) 0 $ sample
+scaleG (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*graphScale)) vals
 
-    getGraph = proc samp -> do
-      id <<< seqer <<< accum_ (updateGraph ws) (makeGraph tscale ws (layers Cpu)) -< samp
+sampleTask :: GraphType -> Auto IO Period [Int]
+sampleTask Cpu = proc t -> id <<< mkState calcCpu [0,0,0] <<< effect readCPU -< t where
+   calcCpu n o =
+     let (user:nice:sys:idle:io:_) = ($!) zipWith (-) n o
+      in ([sys + io, nice, user, idle], n)
 
-createGraph _ = mkConst Nothing
-
-  {-
-createGraph defs@(GraphDef t _ _,_) = create defs (init defs) (sampler t) where
-  init (GraphDef typ tscale _, ws)= makeGraph tscale ws (layers typ)
-  layers Cpu = 3
-  layers (Net _) = 3
-  layers Mem = 2
-  layers Battery = 1
-  sampler Cpu = ($!) mkAutoM_ $ \_ -> do
-    cpu <- readCPU
-    let sampleCpu cpu' = ($!) mkAutoM_ $ \_ -> do
-        cpu'' <- readCPU
-        let (user:nice:sys:idle:io:_) = ($!) zipWith (-) cpu'' cpu'
-        ($!) return ([sys + io, nice, user, idle], ($!) sampleCpu cpu'')
-    ($!) return ([0,0,0,1], ($!) sampleCpu cpu)
-  sampler Mem = ($!) mkAutoM_ $ \_ -> do
-    mem <- ($!) readBatteryFile "/proc/meminfo"
+sampleTask Mem = mkConstM $ do
+    mem <- readBatteryFile "/proc/meminfo"
     let [total,free,cached] = ($!) map (read . (mem !))
            ["MemTotal", "MemFree", "Cached"]
-    ($!) return ([total - free - cached, total - free, total], ($!) sampler Mem)
-  sampler (Net netdev) = ($!) mkAutoM_ $ \_ -> do
-    let f x = log (x + 1)
-        f2 x = f x * f x * f x
-    net <- ($!) fmap (map f2) <$> netState netdev
-    maxspeed <- ($!) fmap (f2 . (*100000000)) <$> deltaTime
-    let m net' maxspeed' = ($!) mkAutoM_ $ \_ -> do
-        ([inbound, outbound], net'') <- ($!) stepAuto (seqer <<< net') ()
-        (maxs, maxspeed'') <- ($!) stepAuto (seqer <<< maxspeed') ()
-        let out = map (truncate . max 0)
-                  [inbound, maxs - inbound - outbound, outbound, 0]
-        ($!) return (out, ($!) m net'' maxspeed'')
-    ($!) return ([0,0,0], ($!) m net maxspeed)
-  sampler _ = ($!) mkAutoM_ $ \_ -> ($!) return ([0,0], ($!) sampler Mem)
-  -}
+    ($!) return [total - free - cached, total - free, total]
+
+sampleTask (Net netdev) = proc t -> id <<< mkState_ calcNet ([0,0], epoch) <<< effect readNet -< t
+  where
+    readNet :: IO ([Int], UTCTime)
+    readNet = do
+      ts <- getCurrentTime
+      net <- readNetFile "/proc/net/dev"
+      let inout = ($!) getNetBytes (net ! netdev)
+      return (inout, ts)
+
+    calcNet :: ([Int], UTCTime) -> ([Int], UTCTime) -> ([Int], ([Int], UTCTime))
+    calcNet (n, nts) (o, ots) =
+      let f x = log (x + 1)
+          f2 x = f x * f x * f x
+          dt = getDt nts ots :: Double
+          [inbound, outbound] = ($!) map (f2 . fromIntegral) $ zipWith (-) n o :: [Double]
+          maxspeed = f2 $ dt * 100000000 :: Double
+          output = map (truncate . max 0)
+              [inbound, maxspeed - inbound - outbound, outbound, 0] :: [Int]
+       in (output, (n, nts)) :: ([Int], ([Int], UTCTime))
+
+
+createGraph :: (GraphDef,Int) -> Auto IO (Period, UTCTime) (Maybe (GraphDef, GraphData))
+createGraph def@(GraphDef typ _ _, _) = graphTask (($!)sampleTask typ) def
+
+
+graphTask :: Auto IO Period [Int] -> (GraphDef, Int) -> Auto IO (Period, UTCTime) (Maybe (GraphDef, GraphData))
+graphTask sample (def@(GraphDef typ tscale period), ws) = proc t -> do
+    matchPeriod <- emitOn (period ==) -< fst t
+    sample <- perBlip sample -< matchPeriod
+    sample2 <- dropB (drops typ) -< sample -- drop initial bad sample
+    graph <- perBlip getGraph -< fmap (GraphSample . scaleG . reverse . tail . scanl (+) 0) sample2
+    id <<< asMaybes -< fmap (\x -> (def, x)) graph
+  where
+    getGraph = proc samp ->
+      id <<< seqer <<< accum_ (updateGraph ws) (makeGraph tscale ws (layers Cpu)) -< samp
+
 
 dump :: (Show a) => String -> Auto IO a ()
 dump msg = mkAutoM_ $ \inp -> do
