@@ -55,6 +55,10 @@ tooltipBackground = "#FFFFC0"
 trayerCmd :: Int -> Int -> String
 trayerCmd = printf "trayer --expand false --edge top --align right\
              \ --widthtype request --height %d --margin %d"
+
+-- Tooltip graphs refreshing while hidden
+persistentTimers = [batteryGraphTimer]
+
 bars :: [Bar]
 --bars = [bar1, bar2]
 bars = [bar1]
@@ -67,7 +71,8 @@ bar1 = Bar barBackground barHeight {-screen-} 0 GravityTop [
               # clockTooltip,
         logtm cpu # cpuTooltip # OnClick "top.sh",
         logtm mem # memTooltip,
-        logtm (net "brkvm"),
+        logtm (net "wlp2s0"),
+        battery,
         trayer,
 
         title # LeftPadding 2 # RightPadding 2 #
@@ -88,12 +93,18 @@ bar2 = Bar barBackground (barHeight*2) {-screen-} 0 GravityTop [
       ]
 
 clockTooltip :: Tooltip
-clockTooltip = Tooltip tooltipBackground (Size 460 (barHeight * 2)) Horizontal [
+clockTooltip = Tooltip tooltipBackground (Size 460 (barHeight * 4)) Horizontal [
         frame Vertical [
+                         tooltipClock #OtherTimeZone "GMT",
+                         tooltipClock #OtherTimeZone "America/Los_Angeles"
+                                       -- 0527 06:17:59.956236
+                                      #TimeFormat "%m%d %H:%M:%S", 
                          tooltipClock #OtherTimeZone "America/Los_Angeles",
                          tooltipClock
                        ] #Width 340,
         frame Vertical [
+           tooltipLabel #Message "GMT: " #JustifyRight,
+           tooltipLabel #Message "MTV TS: " #JustifyRight,
            tooltipLabel #Message "MTV: " #JustifyRight,
            tooltipLabel #Message "Local: " #JustifyRight
                        ]
@@ -115,6 +126,13 @@ netTooltip netdev = Tooltip tooltipBackground (Size 480 (2*barHeight)) Horizonta
      tooltip (tooltipNet netdev) #RefreshRate 1 #LinearTime # Width 100
             # TopPadding 1 # BottomPadding 1,
      tooltipText (netstatus netdev) #RefreshRate 3 # Width 380 #JustifyLeft #LeftPadding 10
+     ]
+
+batteryGraphTimer = 75
+batteryTooltip = Tooltip tooltipBackground (Size 380 (barHeight*8)) Vertical [
+     tooltip batteryGraph #RefreshRate batteryGraphTimer #Height (barHeight*7)
+             # BottomPadding 2  # LeftPadding 2 #RightPadding 2,
+     tooltipText (batteryRate) # Width 380 # Height barHeight
      ]
 
 logtm w = w # LogTime 8 # Width 129 # RefreshRate 1 -- One week worth of data
@@ -173,6 +191,8 @@ data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_
           | MemStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period}
           | Frame   {attr_ :: WidgetAttributes, orient_ :: Orientation, children_ :: [Widget]}
           | Graph   {attr_ :: WidgetAttributes, graph_ :: GraphDef, colorTable :: [String]}
+          | BatteryStatus   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period }
+          | BatteryRate     {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period }
           | Trayer  {attr_ :: WidgetAttributes}
           deriving (Show, Eq)
 
@@ -190,6 +210,9 @@ cpu = Graph defaultAttr (GraphDef Cpu (LogTime 8) 1) ["#70FF70", "#FF8080", "#F0
 
 mem :: Widget
 mem = Graph defaultAttr (GraphDef Mem (LogTime 8) 1) ["#00FF00", "#6060FF"] -- # Width 129
+
+batteryGraph :: Widget
+batteryGraph = Graph defaultAttr (GraphDef Battery LinearTime 1) ["#0760F2"]
 
 net :: String -> Widget
 net netdev = Graph defaultAttr (GraphDef (Net netdev) (LogTime 8) 1)
@@ -210,7 +233,14 @@ title = Title defaultAttr defaultTAttr # Width 4000
 cpuTop :: Widget
 cpuTop = CpuTop defaultAttr defaultTAttr 3 # JustifyLeft
 
+trayer :: Widget
 trayer = Trayer defaultAttr # Width barHeight
+
+battery :: Widget
+battery = BatteryStatus defaultAttr defaultTAttr 10 # Width 120 # batteryTooltip
+
+batteryRate :: Widget
+batteryRate = BatteryRate defaultAttr defaultTAttr 1
 
 frame :: Orientation -> [Widget] -> Widget
 frame = Frame (WidgetAttributes (Size 5000 barHeight) 0 (Padding 0 0)
@@ -392,6 +422,12 @@ exportGraph (LogGraph n g) = transpose $ concatMap (take' n) g where
 
 readBatteryFile = readKeyValueFile $ head . words
 readNetFile = readKeyValueFile $ map read . words
+readFileWithFallback :: String -> IO String
+readFileWithFallback x = readFully x `catchIOError` \x -> return "0"
+
+readBatteryString x = (head . lines) <$> readFileWithFallback ("/sys/class/power_supply/BAT0/" ++ x)
+readBatteryInt x = read <$> readBatteryString x :: IO Int
+
 getDt newTs ts = (/1e12) . fromIntegral . fromEnum $ diffUTCTime newTs ts
 
 getNetBytes input = [inbound, outbound] where
@@ -540,6 +576,7 @@ readNet :: String -> IO ([Int], UTCTime)
 readNet netdev = do
   ts <- getCurrentTime
   net <- readNetFile "/proc/net/dev"
+  when (M.notMember netdev net) $ printf "\nCRASH: Unknown device: %s\n" netdev
   let inout = ($!) getNetBytes (net ! netdev)
   return (inout, ts)
 
@@ -553,7 +590,12 @@ sampleTask Mem = mkConstM $ do
     mem <- readBatteryFile "/proc/meminfo"
     let [total,free,cached] = ($!) map (read . (mem !))
            ["MemTotal", "MemFree", "Cached"]
-    return [total - free - cached, total - free, total]
+    return [total - free - cached, cached, free]
+
+sampleTask Battery = mkConstM $ do
+    capacity <- readBatteryInt "energy_full"
+    remainingCapacity <- readBatteryInt "energy_now"
+    return [remainingCapacity, capacity - remainingCapacity]
 
 sampleTask (Net netdev) =
     seqer <<< proc t -> id <<< mkState_ calcNet ([0,0], epoch) <<< effect (readNet netdev) -< t
@@ -604,6 +646,8 @@ getRefreshRate CpuTop { refreshRate = p } = Just p
 getRefreshRate Clock { refreshRate = p } = Just p
 getRefreshRate NetStatus { refreshRate = p } = Just p
 getRefreshRate MemStatus { refreshRate = p } = Just p
+getRefreshRate BatteryStatus { refreshRate = p } = Just p
+getRefreshRate BatteryRate { refreshRate = p } = Just p
 getRefreshRate _ = Nothing
 
 createTooltip :: Display -> (Window, ScreenNumber)
@@ -825,7 +869,6 @@ makeWidget rs wd@(Graph attr def colors) = wrapAction (LinearGraph []) filterEv 
       let scale = graphScale `div` hs
       let samp = map (map (`div` scale)) $ exportGraph grdata
       let colorTable = map toColor colors
-      -- print ("Paint Graph", def, samp)
       withDraw rs $ \d -> do
         drawRect (display rs) d bg x0 y0 ws hs
         let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
@@ -896,6 +939,29 @@ makeWidget rs wd@MemStatus {} = wrapAction epoch filterEv make where
     perPidInfo <- memInfo
     return $ zipWith (++) mem perPidInfo
 
+makeWidget rs wd@BatteryStatus {} = wrapAction epoch filterEv make where
+  filterEv = filterTimer rs wd
+  make = proc t -> id <<< mkDrawStringWidget rs wd <<< effect batteryStatus -< t
+  batteryStatus = do
+    capacity <- readBatteryInt "energy_full"
+    rate <- readBatteryInt "power_now"
+    remainingCapacity <- readBatteryInt "energy_now"
+    state <- readBatteryString "status" :: IO String
+    let (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
+        percent = remainingCapacity * 100 `div` capacity
+    return $ (: []) $ case state of
+      "Discharging" | rate /= 0 -> printf "%d%%(%d:%02d)" percent h m
+      otherwise -> printf "%d%%C" percent
+
+makeWidget rs wd@BatteryRate {} = wrapAction epoch filterEv make where
+  filterEv = filterTimer rs wd
+  make = proc t -> id <<< mkDrawStringWidget rs wd <<< effect makeMessage -< t
+  makeMessage = do
+    rate <- readBatteryString "power_now"
+    let rateDouble = (read rate) / 1000000 :: Double
+    return . (: []) . printf " Present Rate: %.3f mA" $ rateDouble
+
+
 makeWidget rs wd@Trayer {} = mkStateM_ handler Nothing where
   handler (REv RInit) st = do
     let (pos, sz) = (position $ attr_ wd, size $ attr_ wd)
@@ -951,7 +1017,7 @@ initRootTask dpy ch wins = do
       widgets = concatMap mkWindow wins
       periods = mapMaybe getRefreshRate $ concatMap getWidgets wins
       timers = timerTask ch
-  (_, timers') <- stepAuto timers . TCChangeUsage $ zip periods (repeat 1)
+  (_, timers') <- stepAuto timers . TCChangeUsage $ zip (periods ++ persistentTimers) (repeat 1)
   return $ dataTask dpy timers' mouse graphs' widgets where
         getWidgets (WindowState _ wds) = wds
         getWidgetAndRs (WindowState rs wds) = zip wds (repeat rs)
