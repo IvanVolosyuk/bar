@@ -1,4 +1,4 @@
-{-# LANGUAGE Arrows, DeriveGeneric, DeriveAnyClass #-}
+{-# LANGUAGE Arrows, DeriveGeneric, DeriveAnyClass, LambdaCase #-}
 
 module Timer (
   timerTask,
@@ -10,7 +10,7 @@ module Timer (
   RootInput(..),
   TimerCollectionInp(..),
   epoch,
-  timerMain
+  half
   ) where
 
 import Control.Applicative
@@ -22,20 +22,15 @@ import Control.Auto.Core
 import Control.Concurrent
 import Control.DeepSeq
 import Control.Monad
-import Control.Monad.Loops
-import Control.Monad.Reader
-import Control.Monad.State
 import Data.Maybe
 import Data.Time
 import Data.Time.Clock.POSIX
-import Data.Traversable
 import GHC.Generics (Generic)
-import Text.Printf
 import Prelude hiding ((.), id)
 
 import qualified Data.Map as M
 
-import Icon
+import Utils
 import Graphics.X11.Xlib
 
 data Size = Size {x_ :: Int, y_ :: Int} deriving (Show, Eq, Generic, NFData)
@@ -57,6 +52,18 @@ data TimerCollectionInp = TCNop
 
 type TimerAuto = Interval IO TimerInp (Blip Timestamp)
 
+instance Num Size where
+  (+) (Size x0 y0) (Size x1 y1) = Size (x0 + x1) (y0 + y1)
+  (-) (Size x0 y0) (Size x1 y1) = Size (x0 - x1) (y0 - y1)
+  (*) (Size x0 y0) (Size x1 y1) = Size (x0 * x1) (y0 * y1)
+  abs (Size x y) = Size (abs x) (abs y)
+  signum (Size x y) = Size (signum x) (signum y)
+  fromInteger a = Size (fi a) (fi a)
+
+half :: Size -> Size
+half (Size w h) = Size (w `div` 2) (h `div` 2)
+
+epoch :: UTCTime
 epoch = posixSecondsToUTCTime 0
 
 getRootTickEvents :: RootInput -> IO (Maybe TimerCollectionInp)
@@ -74,7 +81,7 @@ getTimerTickEvents (mp, evt) =
      TCChangeUsage _ -> fmap (conv TNop) mp
      _               -> M.empty
   where
-     conv dflt 0         = TDel
+     conv _ 0            = TDel
      conv dflt u | u > 0 = dflt
      conv _ _            = error "Negative usage"
 
@@ -90,14 +97,12 @@ timerTask ch = proc inpEvt -> do
   where
     updateUsages mp updates = M.unionWith (+) mp (M.fromList updates)
     filterTs = fmap ((`addUTCTime` epoch) . blip 0 id) . M.filter triggered
-    triggered (Blip x) = True
+    triggered (Blip _) = True
     triggered NoBlip = False
 
 
 timerInit :: RootChan -> Period -> TimerAuto 
-timerInit rootCh period = mkAutoM_ $ \inp -> do 
-  -- print ("timerInit", period, inp)
-  case inp of
+timerInit rootCh period = mkAutoM_ $ \case
     TDel -> return (Nothing, timerInit rootCh period)
     _    -> do
       delayCh <- newChan 
@@ -112,7 +117,8 @@ timerInit rootCh period = mkAutoM_ $ \inp -> do
 -- Produces next timestamp for given timestamp and period
 tickTimer :: ThreadId -> Chan NominalDiffTime -> RootChan -> Maybe Timestamp -> Period -> TimerAuto
 tickTimer thr delayCh rootCh start period = mkAutoM_ $ \inp -> do
-  let timeToNextTick ts = period - snd (properFraction (ts/period)) * period
+  let timeToNextTick :: NominalDiffTime -> NominalDiffTime
+      timeToNextTick ts = period - snd (properFraction (ts/period)) * period
   -- print ("tickTimer", start, period, inp)
 
   case inp of
@@ -135,72 +141,3 @@ tickTimer thr delayCh rootCh start period = mkAutoM_ $ \inp -> do
              return (Just (Blip start'), tickTimer thr delayCh rootCh (Just $ start' + period) period)
            else return (Just NoBlip, tickTimer thr delayCh rootCh start period)
 
-
-timerMain = do
-  ch <- newChan :: IO RootChan
-  forkIO $ forever $ do
-    line <- getLine
-    writeChan ch (RTitle line)
-  {- stress test
-  forkIO $ forever $ do
-    threadDelay 10000
-    writeChan ch (RTitle "c 0.0001")
-    threadDelay 10000
-    writeChan ch (RTitle "d 0.0001")
-  -}
-
-  epoch <- parseTimeM True defaultTimeLocale "%Y" "2019" :: IO UTCTime
-  startTs <- (`diffUTCTime` epoch)<$> getCurrentTime
-  let t = timerTask ch
-  let sec = fromRational 1 :: NominalDiffTime
-  let makeDt dt = fromIntegral (round $ dt * 1000000) * sec / 1000000
-
-  (v2, t2) <- stepAuto t $ TCChangeUsage [(5, 1), (3, 1)]
-  print v2
-  (v3, t3) <- stepAuto t2 $ TCTick startTs
-  print v3
-  let run t' = do
-      -- print "Waiting for cmds"
-      cmd <- readChan ch
-      case cmd of
-        RTick -> do
-          ts <- (`diffUTCTime` epoch)<$> getCurrentTime
-          (v'', t'') <- stepAuto t' (TCTick ts)
-          print v''
-          run t''
-        RTitle msg ->
-          case words msg of
-            ("c":n:_) -> do
-              let period = read n :: Double
-              (v'', t'') <- stepAuto t' (TCChangeUsage [(makeDt period, 1)])
-              print v''
-              run t''
-            ("d":n:_) -> do
-              let period = read n :: Double
-              (v'', t'') <- stepAuto t' (TCChangeUsage [(makeDt period, -1)])
-              print v''
-              run t''
-            cmd -> print ("Unknown cmd", cmd) >> run t'
-
-        _ -> do
-          print ("Unknown cmd: ", cmd)
-          run t'
-  run t3
-           
-
-  let input = [
-               TCTick 123.5,
-               TCTick 123.6,
-               TCTick 123.7,
-               TCTick 124.5,
-               TCTick 125.5,
-               TCTick 126.5,
-               TCChangeUsage [(10, 1), (2, -1)],
-               TCChangeUsage [(10, 1), (2, 0)],
-               TCTick 127.5,
-               TCTick 128.5
-              ]
-
-  out <- streamAuto t input
-  mapM_ print $ zip input out
-  return ()

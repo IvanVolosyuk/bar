@@ -16,7 +16,6 @@ import Graphics.X11.Xlib
 import Graphics.X11.Xlib.Extras
 import Numeric
 import System.IO.Error
-import Text.Printf
 
 import qualified Data.Map as M
 
@@ -71,7 +70,7 @@ loadIconImage c@(IconCache dpy atom cache cfg) win =
         return (c, cachedIcon)
      Nothing -> do
        print "Start fetching icon data"
-       iconRawData <- fetchIconData c win `catchIOError` \x -> return $ Just defaultIcon
+       iconRawData <- fetchIconData c win `catchIOError` \_ -> return $ Just defaultIcon
        print "Stop fetching icon data"
        let iconRawData' = fromMaybe defaultIcon iconRawData
            icons = makeIconList iconRawData'
@@ -91,7 +90,7 @@ getIconImage :: Window -> IconCache -> Maybe CachedIcon
 getIconImage win cache = M.lookup win (getCache cache)
        
 
-chunksOf n [] = []
+chunksOf _ [] = []
 chunksOf n s = x : chunksOf n xs where (x,xs) = splitAt n s
 
 toColor str = map (fst . head . readHex) . chunksOf 2 $ tail str 

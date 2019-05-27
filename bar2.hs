@@ -57,6 +57,7 @@ trayerCmd = printf "trayer --expand false --edge top --align right\
              \ --widthtype request --height %d --margin %d"
 
 -- Tooltip graphs refreshing while hidden
+persistentTimers :: [Period]
 persistentTimers = [batteryGraphTimer]
 
 bars :: [Bar]
@@ -71,8 +72,8 @@ bar1 = Bar barBackground barHeight {-screen-} 0 GravityTop [
               # clockTooltip,
         logtm cpu # cpuTooltip # OnClick "top.sh",
         logtm mem # memTooltip,
-        logtm (net "wlp2s0"),
-        battery,
+        logtm (net "brkvm"),
+        -- battery,
         trayer,
 
         title # LeftPadding 2 # RightPadding 2 #
@@ -117,34 +118,47 @@ cpuTooltip = Tooltip tooltipBackground (Size 300 (8*barHeight)) Vertical [
      tooltipText cpuTop # Height (6 * barHeight)
      ]
 
+memTooltip :: Tooltip
 memTooltip = Tooltip tooltipBackground (Size 450 (6*barHeight)) Horizontal [
      tooltipText memstatus #Width 430 #LeftPadding 5,
      tooltip mem #RefreshRate 1 # Width 20 #LinearTime # LogTime 1
      ]
 
+netTooltip :: String -> Tooltip
 netTooltip netdev = Tooltip tooltipBackground (Size 480 (2*barHeight)) Horizontal [
      tooltip (tooltipNet netdev) #RefreshRate 1 #LinearTime # Width 100
             # TopPadding 1 # BottomPadding 1,
      tooltipText (netstatus netdev) #RefreshRate 3 # Width 380 #JustifyLeft #LeftPadding 10
      ]
 
+batteryGraphTimer :: Period
 batteryGraphTimer = 75
+
+batteryTooltip :: Tooltip
 batteryTooltip = Tooltip tooltipBackground (Size 380 (barHeight*8)) Vertical [
      tooltip batteryGraph #RefreshRate batteryGraphTimer #Height (barHeight*7)
              # BottomPadding 2  # LeftPadding 2 #RightPadding 2,
-     tooltipText (batteryRate) # Width 380 # Height barHeight
+     tooltipText batteryRate # Width 380 # Height barHeight
      ]
 
+logtm :: Widget -> Widget
 logtm w = w # LogTime 8 # Width 129 # RefreshRate 1 -- One week worth of data
 
+tooltip :: Widget -> Widget
 tooltip w = w #BackgroundColor "#FFFFC0"
               #TopPadding 0 #BottomPadding 1 #LeftPadding 0 #RightPadding 1
 
+tooltipText :: Widget -> Widget
 tooltipText w = tooltip w  #TextColor "#000000"
               #SetFont "-*-courier new-*-r-normal-*-17-*-*-*-*-*-*-*"
 
+tooltipClock :: Widget
 tooltipClock = tooltipText clock #TimeFormat "%a, %e %b %Y - %X"
+
+tooltipLabel :: Widget
 tooltipLabel = tooltipText label
+
+tooltipNet :: String -> Widget
 tooltipNet netdev = Graph defaultAttr (GraphDef (Net netdev) (LogTime 8) 1)
                     ["#6060FF", tooltipBackground, "#60FF60"]  # Width 129
 
@@ -178,7 +192,7 @@ data WidgetAttributes = WidgetAttributes {
 -- int = n linear points before 2x compression
 data GraphType = Cpu | Net String | Mem | Battery deriving (Show,Eq,Ord, Generic, NFData)
 data TimeScale = LinearTime | LogTime Int deriving (Show,Eq,Ord, Generic, NFData)
-data GraphDef = GraphDef { type_ :: GraphType, tscale_ :: TimeScale, period_ :: Period} deriving (Show, Eq, Ord, Generic, NFData)
+data GraphDef = GraphDef { graphType :: GraphType, tscale_ :: TimeScale, period_ :: Period} deriving (Show, Eq, Ord, Generic, NFData)
 
 data Bar = Bar String Int ScreenNumber Gravity [Widget] deriving Show
 data Tooltip = Tooltip String Size Orientation [Widget] deriving (Show, Eq)
@@ -189,8 +203,8 @@ data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_
           | CpuTop  {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period}
           | NetStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period, netdev_ :: String}
           | MemStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period}
-          | Frame   {attr_ :: WidgetAttributes, orient_ :: Orientation, children_ :: [Widget]}
-          | Graph   {attr_ :: WidgetAttributes, graph_ :: GraphDef, colorTable :: [String]}
+          | Frame   {attr_ :: WidgetAttributes, frameOrientation :: Orientation, children :: [Widget]}
+          | Graph   {attr_ :: WidgetAttributes, graph_ :: GraphDef, graphColorTable :: [String]}
           | BatteryStatus   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period }
           | BatteryRate     {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period }
           | Trayer  {attr_ :: WidgetAttributes}
@@ -262,7 +276,10 @@ instance Apply Tooltip where
   apply tip ww = let WidgetAttributes ws x p c cmd _ = attr_ ww
                    in ww { attr_ = WidgetAttributes ws x p c cmd (Just tip) }
 
+withAttr :: Widget -> (WidgetAttributes -> WidgetAttributes) -> Widget
 withAttr ww f = ww { attr_ = f (attr_ ww) }
+
+withPadding :: Widget -> (Padding -> Padding) -> Widget
 withPadding ww f = withAttr ww $ \wa -> wa { padding = f (padding wa) }
 
 instance Apply Attribute where
@@ -283,15 +300,6 @@ instance Apply Attribute where
   apply (Message s) ww = ww { label_ = s }
   apply (RefreshRate r) ww@(Graph _ def _) = ww { graph_ = def {period_ = r }}
   apply (RefreshRate r) ww = ww { refreshRate = r }
-
-instance Num Size where
-  (+) (Size x0 y0) (Size x1 y1) = Size (x0 + x1) (y0 + y1)
-  (-) (Size x0 y0) (Size x1 y1) = Size (x0 - x1) (y0 - y1)
-  (*) (Size x0 y0) (Size x1 y1) = Size (x0 * x1) (y0 * y1)
-  abs (Size x y) = Size (abs x) (abs y)
-  signum (Size x y) = Size (signum x) (signum y)
-  fromInteger a = Size (fi a) (fi a)
-half (Size w h) = Size (w `div` 2) (h `div` 2)
 
 infixl 9 #
 (#) :: (Apply a) => Widget -> a  -> Widget
@@ -360,14 +368,17 @@ withColor dpy = withXftColorName dpy vis colormap where
   (vis, colormap) = visualColormap dpy
 
 
+drawMessage :: RenderState -> WidgetAttributes -> TextAttributes
+               -> XftFont -> XftDraw -> (IconCache, Size)
+               -> Message -> IO (IconCache, Size)
 drawMessage rs attr tattr font d (icons, off) (Text fg bg msg) = do
-  let WidgetAttributes sz pos  _ wbg _ _ = attr
+  let WidgetAttributes sz pos  _ _ _ _ = attr
   let TextAttributes wfg justify _ ths = tattr
   let dpy = display rs
   glyphInfo <- liftIO $ xftTextExtents dpy font msg
   let (Size ws _, Size x y, Size xoff yoff) = (sz, pos, off)
-  let [dx, dy, twidth, txoff] = map ($ glyphInfo) [
-       xglyphinfo_x, xglyphinfo_y, xglyphinfo_width, xglyphinfo_xOff]
+  let [dx, dy, txoff] = map ($ glyphInfo) [
+       xglyphinfo_x, xglyphinfo_y, xglyphinfo_xOff]
   let x' = x + case justify of
                   JustifyLeft -> dx
                   JustifyMiddle -> (ws - txoff) `div` 2
@@ -379,9 +390,8 @@ drawMessage rs attr tattr font d (icons, off) (Text fg bg msg) = do
   liftIO $ withColor dpy fg' $ \c -> xftDrawString d c font (x' + xoff) (y' + yoff) msg
   return (icons, Size (xoff + txoff) yoff)
 
-drawMessage rs attr tattr font d (icons, off) (IconRef icon) = do
-  let WidgetAttributes sz pos  _ wbg _ _ = attr
-  let (Size ws _, Size x y, Size xoff yoff) = (sz, pos, off)
+drawMessage rs attr tattr _ _ (icons, off) (IconRef icon) = do
+  let (Size x y, Size xoff yoff) = (position attr, off)
   let TextAttributes _ _ _ ths = tattr
 
   (icons', CachedIcon width height img) <- loadIconImage icons icon
@@ -401,35 +411,46 @@ data GraphData = LinearGraph ![GraphSample] | LogGraph Int ![[GraphSample]] deri
 
 makeGraph :: TimeScale -> Int -> Int -> GraphData
 makeGraph LinearTime ws l = LinearGraph $! replicate ws $ replicate l 0
-makeGraph (LogTime n) ws l = LogGraph n $! replicate (1 + ws `div` n) []
+makeGraph (LogTime n) ws _ = LogGraph n $! replicate (1 + ws `div` n) []
 
 avgSamp :: [GraphSample] -> GraphSample -- (a + b + 1) /2
 avgSamp ar = ar `deepseq` map (\v -> (sum v + 1) `div` length v) $ transpose ar
 
+updateGraph :: Int -> GraphData -> GraphSample -> GraphData
 updateGraph ws (LinearGraph g) s = g `deepseq` LinearGraph $! s : take ws g
-updateGraph ws (LogGraph n g) s = g `deepseq` LogGraph n $ updateLayer g s where
+updateGraph _ (LogGraph n g) s = g `deepseq` LogGraph n $ updateLayer g s where
   updateLayer :: [[GraphSample]] -> GraphSample -> [[GraphSample]]
   updateLayer [] _ = []
   updateLayer (vv:xs) v
     | length vv == (n+2) = let (a,b) = splitAt n vv in (v:a):updateLayer xs (avgSamp b)
     | otherwise = (v:vv):xs
 
+exportGraph :: GraphData -> [[Int]]
 exportGraph (LinearGraph g) = transpose g
 exportGraph (LogGraph n g) = transpose $ concatMap (take' n) g where
-  take' n arr = let (a,b) = splitAt (n-1) arr in a ++ (case b of
+  take' n' ar = let (a,b) = splitAt (n'-1) ar in a ++ (case b of
        [] -> []
        _ -> [avgSamp b])
 
+readBatteryFile :: FilePath -> IO (M.Map String String)
 readBatteryFile = readKeyValueFile $ head . words
-readNetFile = readKeyValueFile $ map read . words
-readFileWithFallback :: String -> IO String
-readFileWithFallback x = readFully x `catchIOError` \x -> return "0"
 
+readNetFile :: FilePath -> IO (M.Map String [Integer])
+readNetFile = readKeyValueFile $ map read . words
+
+readFileWithFallback :: String -> IO String
+readFileWithFallback x = readFully x `catchIOError` \_ -> return "0"
+
+readBatteryString :: String -> IO String
 readBatteryString x = (head . lines) <$> readFileWithFallback ("/sys/class/power_supply/BAT0/" ++ x)
+
+readBatteryInt :: String -> IO Int
 readBatteryInt x = read <$> readBatteryString x :: IO Int
 
+getDt :: Fractional t => UTCTime -> UTCTime -> t
 getDt newTs ts = (/1e12) . fromIntegral . fromEnum $ diffUTCTime newTs ts
 
+getNetBytes :: (Num t, Integral a) => [a] -> [t]
 getNetBytes input = [inbound, outbound] where
   atIndex idx = fi $ input !! idx
   inbound = atIndex 0
@@ -440,6 +461,7 @@ makeSegment y0 height (x,y) = Segment x' y0' x' y1' where
   y0' = fi $ height + y0
   y1' = fi $ height + y0 - fi y
 
+drawColorSegment :: RenderState -> ([Segment], Pixel) -> IO ()
 drawColorSegment rs (segments, color) = do
   let RenderState {display = dpy, buffer = w, gc_ = gc} = rs
   setForeground dpy gc color
@@ -501,7 +523,7 @@ copyChanToX chan w = do
   d <- openDisplay ""
   a <- internAtom d "BAR_UPDATE" False
   forever $ do
-     val <- readChan ch
+     _ <- readChan ch
      sendClientEvent d a w 0 `catchIOError`  \x -> do
        print $ "Exception caught: " ++ show x
        sync d False
@@ -951,19 +973,18 @@ makeWidget rs wd@BatteryStatus {} = wrapAction epoch filterEv make where
         percent = remainingCapacity * 100 `div` capacity
     return $ (: []) $ case state of
       "Discharging" | rate /= 0 -> printf "%d%%(%d:%02d)" percent h m
-      otherwise -> printf "%d%%C" percent
+      _ -> printf "%d%%C" percent
 
 makeWidget rs wd@BatteryRate {} = wrapAction epoch filterEv make where
   filterEv = filterTimer rs wd
   make = proc t -> id <<< mkDrawStringWidget rs wd <<< effect makeMessage -< t
   makeMessage = do
     rate <- readBatteryString "power_now"
-    let rateDouble = (read rate) / 1000000 :: Double
+    let rateDouble = read rate / 1000000 :: Double
     return . (: []) . printf " Present Rate: %.3f mA" $ rateDouble
 
-
 makeWidget rs wd@Trayer {} = mkStateM_ handler Nothing where
-  handler (REv RInit) st = do
+  handler (REv RInit) _ = do
     let (pos, sz) = (position $ attr_ wd, size $ attr_ wd)
         cmd = trayerCmd (windowHeight rs) $ windowWidth rs - x_ pos - x_ sz
     print ("trayer cmd ", cmd)
@@ -975,10 +996,11 @@ makeWidget rs wd@Trayer {} = mkStateM_ handler Nothing where
     return (Nothing, Nothing)
   handler _ h = return (Nothing, h)
 
-makeWidget _ wd = proc ev -> do
+makeWidget _ _ = proc ev -> do
   dump "makeWidget" -< ev
   id -< Nothing
 
+extractGraphs :: Widget -> [(GraphDef, Int)]
 extractGraphs (Graph attr graph _) = [(graph, x_ $ size attr)]
 extractGraphs _ = []
 
@@ -997,7 +1019,7 @@ mouseHitWds wds pos =
    in find match wds
 
 mouseHitWins :: [WindowState] -> (Window, Maybe Size) -> Maybe ((Window, ScreenNumber), Widget)
-mouseHitWins wins (w, Nothing) = Nothing
+mouseHitWins _ (w, Nothing) = Nothing
 mouseHitWins wins (w, Just pos) =
   let matchWin (WindowState rs _) = w == window rs
       matchWds (WindowState rs wds) = mouseHitWds wds pos >>= \wd -> Just ((window rs, screenNum rs), wd)
@@ -1020,7 +1042,6 @@ initRootTask dpy ch wins = do
   (_, timers') <- stepAuto timers . TCChangeUsage $ zip (periods ++ persistentTimers) (repeat 1)
   return $ dataTask dpy timers' mouse graphs' widgets where
         getWidgets (WindowState _ wds) = wds
-        getWidgetAndRs (WindowState rs wds) = zip wds (repeat rs)
         mkWindow (WindowState rs wds) = bgWidget rs : map (makeWidget rs) wds
 
 
@@ -1038,8 +1059,8 @@ eventLoop dpy ch auto = do
        MotionEvent {ev_x = x, ev_y = y, ev_window = ww} ->
          return $ RMotion ww $ Just (Size (fi x) (fi y))
        
-       ev@CrossingEvent {ev_x = x, ev_y = y, ev_window = ww} ->
-         if ev_event_type ev == enterNotify
+       e@CrossingEvent {ev_x = x, ev_y = y, ev_window = ww} ->
+         if ev_event_type e == enterNotify
             then return $ RMotion ww $ Just (Size (fi x) (fi y))
             else return $ RMotion ww Nothing
        _ -> return RNop
@@ -1048,54 +1069,8 @@ eventLoop dpy ch auto = do
     RExit -> print "Exiting..."
     _ -> eventLoop dpy ch auto'
 
-
-step a inp = do
-  (_, a') <- stepAuto a inp
-  step a' inp
-
-main1 = do
-  let g1 = proc x -> do
-      sampleTask Cpu -< x
-      sampleTask Mem -< x
-      sampleTask (Net "brkvm") -< x
-      id -< ()
-  step g1 1
-
-main2 = do
-  let g2 = createGraph (GraphDef Cpu (LogTime 8) 1, 200)
-  --let g2 = createGraph (GraphDef Cpu LinearTime 1, 200)
-  step g2 (1, epoch)
-
-run3 :: GraphData -> IO ()
-run3 v = do
-  let v' = updateGraph 200 v [1,2,3,4]
-  v' `seq` run3 v'
-
-main3 :: IO ()
-main3 = do
-  let v = makeGraph LinearTime 200 4
-  run3 v
-
-loop4 :: [Int] -> IO ()
-loop4 x = do
-  when (head x `mod` 10000000 == 0) $ print x
-  let x' = map (+1) x
-  x' `deepseq` loop4 x'
-
-main4 = loop4 $ replicate 200 1
-
-loop5 :: Int -> IO ()
-loop5 x = do
-  when (x `mod` 10000000 == 0) $ print x
-  let x' = x + 1
-  loop5 x'
-
-main5 = loop5 1
-
-main = program
-
-program :: IO ()
-program = do
+main :: IO ()
+main = do
   xSetErrorHandler
   dpy <- openDisplay ""
   -- FIXME: increase to improve throughput?

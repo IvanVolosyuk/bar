@@ -14,7 +14,7 @@ import qualified Data.ByteString as Str
 import qualified Data.ByteString.Char8 as Char8
 
 join :: String -> [String] -> String
-join sep [] = ""
+join _ [] = ""
 join sep (x:xs) = foldl (\a b ->  a++sep++b ) x xs
 
 strip :: String -> String

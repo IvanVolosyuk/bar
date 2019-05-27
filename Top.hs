@@ -5,7 +5,6 @@ module Top (
   memInfo
   ) where
 
-import Control.Concurrent
 import Data.Char
 import Data.Function
 import Data.List
@@ -14,8 +13,6 @@ import System.Directory
 import System.IO.Error
 import Text.Printf
 import Utils
-import qualified Data.ByteString as Str
-import qualified Data.ByteString.Char8 as Char8
 
 {-
 0 pid           process id
@@ -46,11 +43,13 @@ import qualified Data.ByteString.Char8 as Char8
 24rsslim        current limit in bytes on the rss
 -}
 
+valuePicker :: ([String] -> t) -> String -> (String, (String, t))
 valuePicker selector file = (pid, (name, usage)) where
   w@(pid:rest) = words file
   usage = selector $ drop (length w - 52) w
   name = unwords $ take (length w - 51) rest
 
+makeCpuDiff :: M.Map String (String, Int) -> M.Map String (String, Int) -> Double -> IO [String]
 makeCpuDiff newCpuInfo cpuInfo sec = do
   let diff = M.elems $ M.differenceWith (\(n,a) (_,b) -> Just (n,a - b)) newCpuInfo cpuInfo
   let active = filter ( (/= 0) . snd) diff
@@ -59,6 +58,7 @@ makeCpuDiff newCpuInfo cpuInfo sec = do
   ($!) return $! map output sorted where
     output (name, val) = printf "   %2d%% - %s" (perSec sec val) name
 
+readFiles :: [FilePath] -> IO [String]
 readFiles [] = return []
 readFiles (pid:pids) = do
   content <- (Just <$> readFully pid) `catchIOError` \_ -> return Nothing
@@ -71,30 +71,23 @@ readFiles (pid:pids) = do
 pickCpuUsage :: IO (M.Map String (String, Int))
 pickCpuUsage = ($!) M.fromList <$> pickProcValues cpuSelector
 
+pickProcValues :: ([String] -> t) -> IO [(String, (String, t))]
 pickProcValues selector = do
   x <- getDirectoryContents "/proc"
   let pids = map (printf "/proc/%s/stat") $ filter (isDigit . head) x :: [String]
   files <- readFiles pids
   ($!) return $! map (valuePicker selector) files
 
+memInfo :: IO [String]
 memInfo = do
   mem <- pickProcValues memSelector :: IO [(String, (String, Int))]
   ($!) return $! map display . take 6 . sortBy (flip compare `on` snd) . map snd $ mem where
     display (name, val) = printf " %7s - %s" (fmtBytes val) name :: String
   
 
+cpuSelector :: [String] -> Int
 cpuSelector = sum . map read . take 2 . drop 13
+
+memSelector :: [String] -> Int
 memSelector = (*4096) . read . (!!23) :: [String] -> Int
 
-main2 = do
-  cpuInfo <- pickCpuUsage
-  threadDelay 1000000
-  newCpuInfo <- pickCpuUsage
-  makeCpuDiff newCpuInfo cpuInfo 1 :: IO [String]
-  threadDelay 1000000
-  newCpuInfo <- pickCpuUsage
-  makeCpuDiff newCpuInfo cpuInfo 2 :: IO [String]
-
-main = do
-  m <- memInfo
-  print $ show m
