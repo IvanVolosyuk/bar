@@ -42,7 +42,7 @@ data Size = Size {x_ :: Int, y_ :: Int} deriving (Show, Eq, Generic, NFData)
 data RootInput = RNop | RTick | RTitle String | RExpose Window 
                       | RMotion Window (Maybe Size)
                       | RClick Window Size
-                      | RExit deriving (Show, Generic, NFData)
+                      | RExit | RInit deriving (Show, Generic, NFData)
 type RootChan = Chan RootInput
 
 type Period = NominalDiffTime

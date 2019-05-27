@@ -265,7 +265,7 @@ createTooltip dpy pos gState creatorId Nothing = return Done
 createTooltip dpy pos gState creatorId (Just widgetConfig) = do
   print "Enter! Creating Window"
   let tooltipWidth = widgetWidth widgetConfig
-  let scr = (defaultScreen dpy)
+  let scr = defaultScreen dpy
   let visual = defaultVisual dpy scr
   screenWidth <- getScreenWidth dpy
   let winPos = min screenWidth (fi pos + tooltipWidth `div` 2) - tooltipWidth
@@ -281,15 +281,15 @@ createTooltip dpy pos gState creatorId (Just widgetConfig) = do
   changeProperty32 dpy w winType aTOM propModeReplace [fi tooltopAtom]
 
   gc <- createGC dpy w
-  setBackground dpy gc (whitePixel dpy scr) -- FIXME: figure out if this is needed
+  setBackground dpy gc (whitePixel dpy scr) -- TODO: figure out if this is needed
 
   screenWidth <- getScreenWidth dpy
   buf <- createPixmap dpy w (fi screenWidth) (fi $ widgetHeight widgetConfig) (defaultDepth dpy scr)
   buf_gc <- createGC dpy buf
   setBackground dpy gc backgroundColor
-  setLineAttributes dpy gc 1 lineSolid capRound joinRound -- FIXME: use sane attributes for performance
+  setLineAttributes dpy gc 1 lineSolid capRound joinRound -- TODO: use sane attributes for performance
 
-  setBackground dpy gc (whitePixel dpy scr) -- FIXME: figure out if this is needed
+  setBackground dpy gc (whitePixel dpy scr) -- TODO: figure out if this is needed
   setLineAttributes dpy gc 1 lineSolid capRound joinRound
 
   selectInput dpy w (structureNotifyMask .|. exposureMask)

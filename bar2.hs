@@ -52,6 +52,9 @@ infoBackground = "#181838"
 tooltipBackground :: String
 tooltipBackground = "#FFFFC0"
 
+trayerCmd :: Int -> Int -> String
+trayerCmd = printf "trayer --expand false --edge top --align right\
+             \ --widthtype request --height %d --margin %d"
 bars :: [Bar]
 --bars = [bar1, bar2]
 bars = [bar1]
@@ -59,12 +62,13 @@ bars = [bar1]
 bar1 :: Bar
 bar1 = Bar barBackground barHeight {-screen-} 0 GravityTop [
         clock # TimeFormat "%R" # RefreshRate 60 # OnClick "clock.sh"
-              # Width 90 # RightPadding 4
+              # Width 60 # RightPadding 4
               # LocalTimeZone # BackgroundColor infoBackground
               # clockTooltip,
         logtm cpu # cpuTooltip # OnClick "top.sh",
         logtm mem # memTooltip,
         logtm (net "brkvm"),
+        trayer,
 
         title # LeftPadding 2 # RightPadding 2 #
                 BackgroundColor barBackground #
@@ -104,7 +108,7 @@ cpuTooltip = Tooltip tooltipBackground (Size 300 (8*barHeight)) Vertical [
 
 memTooltip = Tooltip tooltipBackground (Size 450 (6*barHeight)) Horizontal [
      tooltipText memstatus #Width 430 #LeftPadding 5,
-     tooltip mem #RefreshRate 1 # Width 20 #LinearTime
+     tooltip mem #RefreshRate 1 # Width 20 #LinearTime # LogTime 1
      ]
 
 netTooltip netdev = Tooltip tooltipBackground (Size 480 (2*barHeight)) Horizontal [
@@ -169,6 +173,7 @@ data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_
           | MemStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period}
           | Frame   {attr_ :: WidgetAttributes, orient_ :: Orientation, children_ :: [Widget]}
           | Graph   {attr_ :: WidgetAttributes, graph_ :: GraphDef, colorTable :: [String]}
+          | Trayer  {attr_ :: WidgetAttributes}
           deriving (Show, Eq)
 
 defaultAttr :: WidgetAttributes
@@ -204,6 +209,8 @@ title = Title defaultAttr defaultTAttr # Width 4000
 
 cpuTop :: Widget
 cpuTop = CpuTop defaultAttr defaultTAttr 3 # JustifyLeft
+
+trayer = Trayer defaultAttr # Width barHeight
 
 frame :: Orientation -> [Widget] -> Widget
 frame = Frame (WidgetAttributes (Size 5000 barHeight) 0 (Padding 0 0)
@@ -889,6 +896,19 @@ makeWidget rs wd@MemStatus {} = wrapAction epoch filterEv make where
     perPidInfo <- memInfo
     return $ zipWith (++) mem perPidInfo
 
+makeWidget rs wd@Trayer {} = mkStateM_ handler Nothing where
+  handler (REv RInit) st = do
+    let (pos, sz) = (position $ attr_ wd, size $ attr_ wd)
+        cmd = trayerCmd (windowHeight rs) $ windowWidth rs - x_ pos - x_ sz
+    print ("trayer cmd ", cmd)
+    handle <- runCommand cmd
+    return (Nothing, Just handle)
+
+  handler (REv RExit) h = do
+    forM_ h terminateProcess
+    return (Nothing, Nothing)
+  handler _ h = return (Nothing, h)
+
 makeWidget _ wd = proc ev -> do
   dump "makeWidget" -< ev
   id -< Nothing
@@ -938,6 +958,7 @@ initRootTask dpy ch wins = do
         mkWindow (WindowState rs wds) = bgWidget rs : map (makeWidget rs) wds
 
 
+eventLoop :: Display -> RootChan -> Auto IO RootInput () -> IO ()
 eventLoop dpy ch auto = do
   rootEv <- ($!) allocaXEvent $ \ev -> do
     nextEvent dpy ev
@@ -956,11 +977,10 @@ eventLoop dpy ch auto = do
             then return $ RMotion ww $ Just (Size (fi x) (fi y))
             else return $ RMotion ww Nothing
        _ -> return RNop
+  (_, auto') <- stepAuto auto rootEv
   case rootEv of
     RExit -> print "Exiting..."
-    _ -> do
-      (_, auto') <- stepAuto auto rootEv
-      eventLoop dpy ch auto'
+    _ -> eventLoop dpy ch auto'
 
 
 step a inp = do
@@ -1021,5 +1041,6 @@ program = do
   forkOS $ copyChanToX controlCh $ window firstRs
 
   auto <- initRootTask dpy controlCh wins
-  eventLoop dpy controlCh auto
+  (_, auto') <- stepAuto auto RInit
+  eventLoop dpy controlCh auto'
 
