@@ -1,4 +1,5 @@
-{-# LANGUAGE Arrows #-}
+{-# LANGUAGE Arrows, DeriveGeneric, DeriveAnyClass #-}
+
 module Timer (
   timerTask,
   getRootTickEvents,
@@ -19,6 +20,7 @@ import Control.Auto.Blip.Internal
 import Control.Auto.Collection
 import Control.Auto.Core
 import Control.Concurrent
+import Control.DeepSeq
 import Control.Monad
 import Control.Monad.Loops
 import Control.Monad.Reader
@@ -27,6 +29,7 @@ import Data.Maybe
 import Data.Time
 import Data.Time.Clock.POSIX
 import Data.Traversable
+import GHC.Generics (Generic)
 import Text.Printf
 import Prelude hiding ((.), id)
 
@@ -35,10 +38,11 @@ import qualified Data.Map as M
 import Icon
 import Graphics.X11.Xlib
 
-data Size = Size {x_ :: Int, y_ :: Int} deriving (Show, Eq)
+data Size = Size {x_ :: Int, y_ :: Int} deriving (Show, Eq, Generic, NFData)
 data RootInput = RNop | RTick | RTitle String | RExpose Window 
                       | RMotion Window (Maybe Size)
-                      | RClick Window Size deriving Show
+                      | RClick Window Size
+                      | RExit deriving (Show, Generic, NFData)
 type RootChan = Chan RootInput
 
 type Period = NominalDiffTime
@@ -92,7 +96,7 @@ timerTask ch = proc inpEvt -> do
 
 timerInit :: RootChan -> Period -> TimerAuto 
 timerInit rootCh period = mkAutoM_ $ \inp -> do 
-  print ("timerInit", period, inp)
+  -- print ("timerInit", period, inp)
   case inp of
     TDel -> return (Nothing, timerInit rootCh period)
     _    -> do

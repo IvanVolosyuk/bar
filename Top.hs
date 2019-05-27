@@ -80,7 +80,7 @@ pickProcValues selector = do
 memInfo = do
   mem <- pickProcValues memSelector :: IO [(String, (String, Int))]
   ($!) return $! map display . take 6 . sortBy (flip compare `on` snd) . map snd $ mem where
-    display (name, val) = printf " %7s - %s" (bytes val) name :: String
+    display (name, val) = printf " %7s - %s" (fmtBytes val) name :: String
   
 
 cpuSelector = sum . map read . take 2 . drop 13

@@ -1,13 +1,8 @@
-
 module Utils (
-  pair,
   join,
-  split,
-  split1,
   strip,
   fi,
-  loop,
-  bytes,
+  fmtBytes,
   perSec,
   readKeyValueFile,
   readFully
@@ -18,43 +13,35 @@ import qualified Data.Map as M
 import qualified Data.ByteString as Str
 import qualified Data.ByteString.Char8 as Char8
 
-pair op (a,b) = op a b
+join :: String -> [String] -> String
 join sep [] = ""
-join sep (x:xs) = foldl (\x y ->  x++sep++y ) x xs
-
-split :: Char -> String -> [String]
-split ch s =  case dropWhile (==ch) s of
-  "" -> []
-  s' -> word : split ch s''
-    where (word, s'') = break (==ch) s'
+join sep (x:xs) = foldl (\a b ->  a++sep++b ) x xs
 
 strip :: String -> String
 strip = reverse . dropWhile p . reverse . dropWhile p where
   p = (==' ')
 
-split1 ch s = (x, safeTail xs) where
-  safeTail [] = []
-  safeTail (x:xs) = xs
+split1 :: Eq t => t -> [t] -> ([t], [t])
+split1 ch s = (x, drop 1 xs) where
   (x,xs) = break (==ch) s
 
 fi :: (Integral a, Num b) => a -> b
 fi = fromIntegral
 
-loop f input = do
-  output <- f input
-  loop f output
-
 readFully :: FilePath -> IO String
 readFully f = Char8.unpack <$> Str.readFile f
 
-bytes :: Int -> String
-bytes b
+fmtBytes :: Int -> String
+fmtBytes b
   | b < 1024 = printf "%d bytes" b
   | b < (1024 * 1024) = printf "%d KiB" (b `div` 1024)
   | b < (10 * 1024 * 1024) = printf "%.1f MB" (bf / (1024 * 1024))
-  | b >= (10 * 1024 * 1024) = printf "%d MB" (b `div` (1024 * 1024)) where
+  | b >= (10 * 1024 * 1024) = printf "%d MB" (b `div` (1024 * 1024))
+  | otherwise = ""
+ where
     bf = fromIntegral b :: Double
 
+readKeyValueFile :: (String -> a) -> FilePath -> IO (M.Map String a)
 readKeyValueFile pp filename = makeMap <$> readFully filename where
   makeMap l = M.fromList $ map parseLine . lines $ l
   parseLine l = (strip k, pp v) where

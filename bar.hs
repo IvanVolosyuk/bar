@@ -769,10 +769,10 @@ zNetInfoWidget dev global@(config, rs, wrs, ch) z =
     makeOutput dt (netState, total, totalDt) = do
       newNetState <- getNetState
       let netDelta = delta (newNetState ! dev) (netState ! dev)
-          curr@[inbound, outbound] = map (bytes . perSec dt) . getNetBytes $ netDelta
-          total' = map (pair (+)) $ zip total $ getNetBytes netDelta
+          curr@[inbound, outbound] = map (fmtBytes . perSec dt) . getNetBytes $ netDelta
+          total' = zipWith (+) total $ getNetBytes netDelta
           totalDt' = totalDt + dt
-          [avgIn, avgOut] = map (bytes . perSec totalDt') total'
+          [avgIn, avgOut] = map (fmtBytes . perSec totalDt') total'
           message = printf "In: %s/s : Out: %s/s" inbound outbound
           totalMessage = printf "Avg In: %s/s : Out: %s/s" avgIn avgOut
       return ([message, totalMessage], (newNetState, total', totalDt'))
@@ -786,7 +786,7 @@ zMemInfoWidget global@(config, rs, wrs, ch) z =
       let mem = map (\n -> printf "%7s: %4d MB" n (x M.! n)) values
       perPidInfo <- memInfo
       return perPidInfo
-      return $ map (pair (++)) $ zip mem perPidInfo
+      return $ zipWith (++) mem perPidInfo
 
 zTrayerPlaceholder global@(config, rs, wrs, ch) z = do
   handle <- runCommand . trayerCmd $ getBarWidth rs - widgetX config - widgetWidth config
