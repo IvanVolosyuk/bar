@@ -1,6 +1,1 @@
-*.o
-*.hi
-dzen
-icons/i*
-geticon
-*_stub.*
+dist

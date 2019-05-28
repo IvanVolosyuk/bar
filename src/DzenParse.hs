@@ -32,27 +32,27 @@ parseColor = (\c -> if c == "" then Nothing else Just c) <$> many (noneOf ")")
 parseMessage :: MbColor -> MbColor -> String -> GenParser Char st [Message]
 parseMessage fg bg s =
   let wrapup f = do
-      rest <- f
-      return $ if s == "" then rest else Text fg bg (reverse s) : rest in
-       try (do
-         _ <- string "^"
-         typ <- parseColorType
-         _ <- string "("
-         color <- parseColor
-         _ <- string ")"
-         wrapup (case typ of
-           Foreground -> parseMessage color bg ""
-           Background -> parseMessage fg color ""))
-       <|> try (do
-         _ <- string "{"
-         winid <- many1 digit 
-         _ <- string "}"
-         rest <- wrapup (parseMessage fg bg "")
-         return (IconRef (read winid) : rest))
-       <|> (do
-         c <- anyChar
-         parseMessage fg bg (c : s))
-       <|> wrapup (return [])
+       rest <- f
+       return $ if s == "" then rest else Text fg bg (reverse s) : rest in
+        try (do
+          _ <- string "^"
+          typ <- parseColorType
+          _ <- string "("
+          color <- parseColor
+          _ <- string ")"
+          wrapup (case typ of
+            Foreground -> parseMessage color bg ""
+            Background -> parseMessage fg color ""))
+        <|> try (do
+          _ <- string "{"
+          winid <- many1 digit 
+          _ <- string "}"
+          rest <- wrapup (parseMessage fg bg "")
+          return (IconRef (read winid) : rest))
+        <|> (do
+          c <- anyChar
+          parseMessage fg bg (c : s))
+        <|> wrapup (return [])
 
 mergeText :: [Message] -> [Message]
 mergeText [] = []

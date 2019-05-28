@@ -8,62 +8,54 @@
 -- Normally, you'd only override those defaults you care about.
 --
 
-import XMonad
+import Control.Monad
+import Data.List (delete)
+import Data.List (isPrefixOf, isSuffixOf)
+import Data.Maybe (fromMaybe)
 import Data.Monoid
-import System.Exit
+import Graphics.X11.ExtraTypes.XF86
 import System.Cmd
 import System.Environment
+import System.Exit
 import System.IO
+import System.Process
+import XMonad
+import XMonad.Actions.CopyWindow
 import XMonad.Hooks.DynamicLog
 import XMonad.Hooks.ManageDocks
-import XMonad.Layout.WindowNavigation as NAV
-import XMonad.Layout.Decoration
-import XMonad.Layout.DecorationMadness
-import XMonad.Util.Run(spawnPipe)
-import qualified XMonad.Hooks.ICCCMFocus as ICCCMFocus
-
-import qualified XMonad.StackSet as W
-import qualified Data.Map        as M
-
-import XMonad.Util.Themes
-import XMonad.Layout.Tabbed
-import XMonad.Layout.NoBorders
-import XMonad.Layout.Reflect
-import XMonad.Layout.ResizableTile
-import XMonad.Layout.ThreeColumns
-import XMonad.Layout.Roledex
-import XMonad.Layout.DecorationMadness
-import XMonad.Layout.MouseResizableTile
-import XMonad.Layout.MultiColumns
+import XMonad.Hooks.ManageHelpers
+import XMonad.Hooks.UrgencyHook
 import XMonad.Layout.Accordion
 import XMonad.Layout.BinarySpacePartition as BSP
-import XMonad.Layout.Dishes
 import XMonad.Layout.BorderResize
-import XMonad.Layout.MagicFocus
-import XMonad.Layout.Named
-import XMonad.Layout.Renamed
-import XMonad.Layout.SubLayouts
-import XMonad.Actions.CopyWindow
+import XMonad.Layout.Decoration
+import XMonad.Layout.DecorationMadness
+import XMonad.Layout.DecorationMadness
+import XMonad.Layout.Dishes
 import XMonad.Layout.Hidden as Hidden
-import XMonad.Util.XUtils as XUtils
-import Data.List (isPrefixOf, isSuffixOf)
-import Control.Monad
-
-import Control.Monad (when)
-import Data.List (delete)
-import Data.Maybe (fromMaybe)
-import Data.Monoid (All(All))
-import XMonad.Util.WindowProperties (getProp32)
-import Data.List (isPrefixOf)
-
-import XMonad.Hooks.ManageHelpers
-
-
-import XMonad.Hooks.UrgencyHook
-import qualified XMonad.StackSet as S
+import XMonad.Layout.MagicFocus
+import XMonad.Layout.MouseResizableTile
+import XMonad.Layout.MultiColumns
+import XMonad.Layout.Named
+import XMonad.Layout.NoBorders
+import XMonad.Layout.Reflect
+import XMonad.Layout.Renamed
+import XMonad.Layout.ResizableTile
+import XMonad.Layout.Roledex
+import XMonad.Layout.SubLayouts
+import XMonad.Layout.Tabbed
+import XMonad.Layout.ThreeColumns
+import XMonad.Layout.WindowNavigation as NAV
 import XMonad.Util.NamedWindows
-import System.Process
-import Graphics.X11.ExtraTypes.XF86
+import XMonad.Util.Run(spawnPipe)
+import XMonad.Util.Themes
+import XMonad.Util.WindowProperties (getProp32)
+import XMonad.Util.XUtils as XUtils
+
+import qualified XMonad.Hooks.ICCCMFocus as ICCCMFocus
+import qualified XMonad.StackSet as W
+import qualified Data.Map        as M
+import qualified XMonad.StackSet as S
 
 
 -- The preferred terminal program, which is used in a binding below and by
@@ -412,7 +404,7 @@ myStartupHook = docksStartupHook
 -- Run xmonad with the settings you specify. No need to modify this.
 --
 main = do
-  xmproc <- spawnPipe "/home/ivan/.xmonad/ivan/dzen.sh"
+  xmproc <- spawnPipe "/home/ivan/.xmonad/bar/bar.sh"
   xmonad $ docks $ defaults xmproc
 
 -- A structure containing your configuration settings, overriding
@@ -421,7 +413,7 @@ main = do
 --
 -- No need to modify this.
 --
-defaults xmproc = defaultConfig {
+defaults xmproc = def {
       -- simple stuff
         terminal           = myTerminal,
         focusFollowsMouse  = myFocusFollowsMouse,

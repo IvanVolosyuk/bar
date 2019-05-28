@@ -9,8 +9,7 @@ import Control.Auto.Core
 import Control.Auto.Time
 import Control.Concurrent
 import Control.DeepSeq
-import Control.Monad.Reader
-import Control.Monad.State
+import Control.Monad
 import Data.Bits
 import Data.IORef
 import Data.List
@@ -72,8 +71,8 @@ bar1 = Bar barBackground barHeight {-screen-} 0 GravityTop [
               # clockTooltip,
         logtm cpu # cpuTooltip # OnClick "top.sh",
         logtm mem # memTooltip,
-        logtm (net "brkvm"),
-        -- battery,
+        logtm (net "eth0"),
+        battery,
         trayer,
 
         title # LeftPadding 2 # RightPadding 2 #
@@ -330,11 +329,6 @@ formatClock fmt zoned = do
   zonedTime <- zoned time
   return $ formatTime Data.Time.defaultTimeLocale fmt zonedTime
 
-
-
-type DrawCall a = StateT IconCache IO a
-type DrawCallback = Maybe XftDraw -> DrawCall ()
-type DrawRef = IORef DrawCallback
 type ControlChan = Chan RootInput
 
 data RenderState = RenderState {
@@ -375,7 +369,7 @@ drawMessage rs attr tattr font d (icons, off) (Text fg bg msg) = do
   let WidgetAttributes sz pos  _ _ _ _ = attr
   let TextAttributes wfg justify _ ths = tattr
   let dpy = display rs
-  glyphInfo <- liftIO $ xftTextExtents dpy font msg
+  glyphInfo <- xftTextExtents dpy font msg
   let (Size ws _, Size x y, Size xoff yoff) = (sz, pos, off)
   let [dx, dy, txoff] = map ($ glyphInfo) [
        xglyphinfo_x, xglyphinfo_y, xglyphinfo_xOff]
@@ -385,9 +379,8 @@ drawMessage rs attr tattr font d (icons, off) (Text fg bg msg) = do
                   JustifyRight ->  ws - txoff
   let y' = y + ((ths + dy) `div` 2)
   let fg' = fromMaybe wfg fg
-  -- liftIO $ print (show msg ++ "  " ++ show x' ++ " " ++ show y' ++ " w:" ++ show txoff)
-  liftIO $ forM_ bg $ \c -> drawRect dpy d c (x + xoff) (y + yoff) ws ths
-  liftIO $ withColor dpy fg' $ \c -> xftDrawString d c font (x' + xoff) (y' + yoff) msg
+  forM_ bg $ \c -> drawRect dpy d c (x + xoff) (y + yoff) ws ths
+  withColor dpy fg' $ \c -> xftDrawString d c font (x' + xoff) (y' + yoff) msg
   return (icons, Size (xoff + txoff) yoff)
 
 drawMessage rs attr tattr _ _ (icons, off) (IconRef icon) = do
@@ -1051,7 +1044,7 @@ eventLoop dpy ch auto = do
     nextEvent dpy ev
     event <- getEvent ev
     case event of
-       ClientMessageEvent {ev_data = 0:_} -> liftIO $ readChan ch
+       ClientMessageEvent {ev_data = 0:_} -> readChan ch
        ExposeEvent { ev_window = w } ->      return $ RExpose w
        ButtonEvent {ev_x = x, ev_y = y, ev_window = ww} ->
          return $ RClick ww $ Size (fi x) (fi y)
