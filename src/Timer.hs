@@ -121,6 +121,16 @@ tickTimer thr delayCh rootCh start period = mkAutoM_ $ \inp -> do
       timeToNextTick ts = period - snd (properFraction (ts/period)) * period
   -- print ("tickTimer", start, period, inp)
 
+  let alignTick tick  = do
+       let ts' = tick + timeToNextTick tick
+       -- print ("Next wakeup ", tick, ts')
+       writeChan delayCh ts'
+       return (Just (Blip tick), tickTimer thr delayCh rootCh (Just ts') period)
+  let nextTick start' = do
+       -- print ("Next periodic ", start' + period)
+       writeChan delayCh (start' + period)
+       return (Just (Blip start'), tickTimer thr delayCh rootCh (Just $ start' + period) period)
+
   case inp of
     TNop -> return (Just NoBlip, tickTimer thr delayCh rootCh start period)
     TDel -> do
@@ -128,16 +138,11 @@ tickTimer thr delayCh rootCh start period = mkAutoM_ $ \inp -> do
       killThread thr
       return (Nothing, timerInit rootCh period)
     TTick tick -> case start of
-         Nothing -> do
-           let ts' = tick + timeToNextTick tick
-           -- print ("Next wakeup ", tick, ts')
-           writeChan delayCh ts'
-           return (Just (Blip tick), tickTimer thr delayCh rootCh (Just ts') period)
-         Just start' ->
-           if tick > start'
-           then do
-             -- print ("Next periodic ", start' + period)
-             writeChan delayCh (start' + period)
-             return (Just (Blip start'), tickTimer thr delayCh rootCh (Just $ start' + period) period)
-           else return (Just NoBlip, tickTimer thr delayCh rootCh start period)
+      Nothing -> alignTick tick
+      Just start' ->
+        if tick > start'
+        then if tick - start' > 2 * period
+           then alignTick tick -- drop ticks
+           else nextTick start'
+        else return (Just NoBlip, tickTimer thr delayCh rootCh start period)
 

@@ -9,6 +9,7 @@ import Control.Auto.Core
 import Control.Auto.Time
 import Control.Concurrent
 import Control.DeepSeq
+import Control.Exception
 import Control.Monad
 import Data.Bits
 import Data.IORef
@@ -72,7 +73,10 @@ bar1 = Bar barBackground barHeight {-screen-} 0 GravityTop [
         logtm cpu # cpuTooltip # OnClick "top.sh",
         logtm mem # memTooltip,
         logtm (net "eth0"),
-        battery,
+        logtm (net "brkvm"),
+        logtm (net "wlp2s0"),
+        battery "BAT0",
+        battery "BAT1",
         trayer,
 
         title # LeftPadding 2 # RightPadding 2 #
@@ -133,11 +137,11 @@ netTooltip netdev = Tooltip tooltipBackground (Size 480 (2*barHeight)) Horizonta
 batteryGraphTimer :: Period
 batteryGraphTimer = 75
 
-batteryTooltip :: Tooltip
-batteryTooltip = Tooltip tooltipBackground (Size 380 (barHeight*8)) Vertical [
-     tooltip batteryGraph #RefreshRate batteryGraphTimer #Height (barHeight*7)
+batteryTooltip :: String -> Tooltip
+batteryTooltip name = Tooltip tooltipBackground (Size 380 (barHeight*8)) Vertical [
+     tooltip (batteryGraph name) #RefreshRate batteryGraphTimer #Height (barHeight*7)
              # BottomPadding 2  # LeftPadding 2 #RightPadding 2,
-     tooltipText batteryRate # Width 380 # Height barHeight
+     tooltipText (batteryRate name) # Width 380 # Height barHeight
      ]
 
 logtm :: Widget -> Widget
@@ -189,7 +193,7 @@ data WidgetAttributes = WidgetAttributes {
   mbtooltip :: Maybe Tooltip } deriving (Show, Eq)
 
 -- int = n linear points before 2x compression
-data GraphType = Cpu | Net String | Mem | Battery deriving (Show,Eq,Ord, Generic, NFData)
+data GraphType = Cpu | Net String | Mem | Battery String deriving (Show,Eq,Ord, Generic, NFData)
 data TimeScale = LinearTime | LogTime Int deriving (Show,Eq,Ord, Generic, NFData)
 data GraphDef = GraphDef { graphType :: GraphType, tscale_ :: TimeScale, period_ :: Period} deriving (Show, Eq, Ord, Generic, NFData)
 
@@ -204,8 +208,8 @@ data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_
           | MemStatus{attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period}
           | Frame   {attr_ :: WidgetAttributes, frameOrientation :: Orientation, children :: [Widget]}
           | Graph   {attr_ :: WidgetAttributes, graph_ :: GraphDef, graphColorTable :: [String]}
-          | BatteryStatus   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period }
-          | BatteryRate     {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, refreshRate :: Period }
+          | BatteryStatus   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, batteryName :: String, refreshRate :: Period }
+          | BatteryRate     {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, batteryName :: String, refreshRate :: Period }
           | Trayer  {attr_ :: WidgetAttributes}
           deriving (Show, Eq)
 
@@ -224,8 +228,8 @@ cpu = Graph defaultAttr (GraphDef Cpu (LogTime 8) 1) ["#70FF70", "#FF8080", "#F0
 mem :: Widget
 mem = Graph defaultAttr (GraphDef Mem (LogTime 8) 1) ["#00FF00", "#6060FF"] -- # Width 129
 
-batteryGraph :: Widget
-batteryGraph = Graph defaultAttr (GraphDef Battery LinearTime 1) ["#0760F2"]
+batteryGraph :: String -> Widget
+batteryGraph name = Graph defaultAttr (GraphDef (Battery name) LinearTime 1) ["#0760F2"]
 
 net :: String -> Widget
 net netdev = Graph defaultAttr (GraphDef (Net netdev) (LogTime 8) 1)
@@ -249,11 +253,11 @@ cpuTop = CpuTop defaultAttr defaultTAttr 3 # JustifyLeft
 trayer :: Widget
 trayer = Trayer defaultAttr # Width barHeight
 
-battery :: Widget
-battery = BatteryStatus defaultAttr defaultTAttr 10 # Width 120 # batteryTooltip
+battery :: String -> Widget
+battery name = BatteryStatus defaultAttr defaultTAttr name 10 # Width 120 # batteryTooltip name
 
-batteryRate :: Widget
-batteryRate = BatteryRate defaultAttr defaultTAttr 1
+batteryRate :: String -> Widget
+batteryRate name = BatteryRate defaultAttr defaultTAttr name 1
 
 frame :: Orientation -> [Widget] -> Widget
 frame = Frame (WidgetAttributes (Size 5000 barHeight) 0 (Padding 0 0)
@@ -434,11 +438,15 @@ readNetFile = readKeyValueFile $ map read . words
 readFileWithFallback :: String -> IO String
 readFileWithFallback x = readFully x `catchIOError` \_ -> return "0"
 
-readBatteryString :: String -> IO String
-readBatteryString x = (head . lines) <$> readFileWithFallback ("/sys/class/power_supply/BAT0/" ++ x)
 
-readBatteryInt :: String -> IO Int
-readBatteryInt x = read <$> readBatteryString x :: IO Int
+batteryFile :: String -> String -> String
+batteryFile n x = "/sys/class/power_supply/" ++ n ++ "/" ++ x
+
+readBatteryString :: String -> String -> IO String
+readBatteryString n x = (head . lines) <$> readFileWithFallback (batteryFile n x)
+
+readBatteryInt :: String -> String -> IO Int
+readBatteryInt n x = read <$> readBatteryString n x :: IO Int
 
 getDt :: Fractional t => UTCTime -> UTCTime -> t
 getDt newTs ts = (/1e12) . fromIntegral . fromEnum $ diffUTCTime newTs ts
@@ -521,6 +529,25 @@ copyChanToX chan w = do
        print $ "Exception caught: " ++ show x
        sync d False
 
+
+checkBattery wd n = do
+  r <- tryIOError $ readFully $ batteryFile n "status"
+  case r of
+    Left _ -> print ("Unknown battery", n) >> return Nothing
+    Right _ -> return (Just wd)
+
+checkNetdev wd n = do
+  net <- readNetFile "/proc/net/dev"
+  return $ if M.member n net then Just wd else Nothing
+
+removeBroken wd@Graph {graph_ = (GraphDef (Battery n) _ _)} = checkBattery wd n
+removeBroken wd@BatteryRate {batteryName = n} = checkBattery wd n
+removeBroken wd@BatteryStatus {batteryName = n} = checkBattery wd n
+removeBroken wd@Graph {graph_ = (GraphDef (Net n) _ _)} = checkNetdev wd n
+removeBroken wd@NetStatus {netdev_ = n} = checkNetdev wd n
+removeBroken wd = return $ Just wd
+
+
 makeBar :: Display -> ControlChan -> Bar -> IO WindowState
 makeBar dpy controlCh (Bar bg height scr gravity wds) = do
   let width = fi $ displayWidth dpy scr
@@ -564,7 +591,8 @@ makeBar dpy controlCh (Bar bg height scr gravity wds) = do
                               .|. leaveWindowMask
                               .|. pointerMotionMask
 
-  let widgets = layoutWidgets Horizontal (Size width height) wds
+  wds' <- catMaybes <$> mapM removeBroken wds
+  let widgets = layoutWidgets Horizontal (Size width height) wds'
   return $ WindowState rs widgets
 
 getMotionEvent :: RootInput -> Maybe (Window, Maybe Size)
@@ -578,7 +606,7 @@ getClickEvent _ = Nothing
 layers Cpu = 3
 layers (Net _) = 3
 layers Mem = 2
-layers Battery = 1
+layers (Battery _) = 1
 
 drops Mem = 0
 drops _ = 1
@@ -591,7 +619,6 @@ readNet :: String -> IO ([Int], UTCTime)
 readNet netdev = do
   ts <- getCurrentTime
   net <- readNetFile "/proc/net/dev"
-  when (M.notMember netdev net) $ printf "\nCRASH: Unknown device: %s\n" netdev
   let inout = ($!) getNetBytes (net ! netdev)
   return (inout, ts)
 
@@ -607,9 +634,9 @@ sampleTask Mem = mkConstM $ do
            ["MemTotal", "MemFree", "Cached"]
     return [total - free - cached, cached, free]
 
-sampleTask Battery = mkConstM $ do
-    capacity <- readBatteryInt "energy_full"
-    remainingCapacity <- readBatteryInt "energy_now"
+sampleTask (Battery n) = mkConstM $ do
+    capacity <- readBatteryInt n "energy_full"
+    remainingCapacity <- readBatteryInt n "energy_now"
     return [remainingCapacity, capacity - remainingCapacity]
 
 sampleTask (Net netdev) =
@@ -954,25 +981,25 @@ makeWidget rs wd@MemStatus {} = wrapAction epoch filterEv make where
     perPidInfo <- memInfo
     return $ zipWith (++) mem perPidInfo
 
-makeWidget rs wd@BatteryStatus {} = wrapAction epoch filterEv make where
+makeWidget rs wd@BatteryStatus {batteryName = n} = wrapAction epoch filterEv make where
   filterEv = filterTimer rs wd
   make = proc t -> id <<< mkDrawStringWidget rs wd <<< effect batteryStatus -< t
   batteryStatus = do
-    capacity <- readBatteryInt "energy_full"
-    rate <- readBatteryInt "power_now"
-    remainingCapacity <- readBatteryInt "energy_now"
-    state <- readBatteryString "status" :: IO String
+    capacity <- readBatteryInt n "energy_full"
+    rate <- readBatteryInt n "power_now"
+    remainingCapacity <- readBatteryInt n "energy_now"
+    state <- readBatteryString n "status" :: IO String
     let (h, m) = (remainingCapacity * 60 `div` rate) `divMod` 60
         percent = remainingCapacity * 100 `div` capacity
     return $ (: []) $ case state of
       "Discharging" | rate /= 0 -> printf "%d%%(%d:%02d)" percent h m
       _ -> printf "%d%%C" percent
 
-makeWidget rs wd@BatteryRate {} = wrapAction epoch filterEv make where
+makeWidget rs wd@BatteryRate {batteryName = n} = wrapAction epoch filterEv make where
   filterEv = filterTimer rs wd
   make = proc t -> id <<< mkDrawStringWidget rs wd <<< effect makeMessage -< t
   makeMessage = do
-    rate <- readBatteryString "power_now"
+    rate <- readBatteryString n "power_now"
     let rateDouble = read rate / 1000000 :: Double
     return . (: []) . printf " Present Rate: %.3f mA" $ rateDouble
 
