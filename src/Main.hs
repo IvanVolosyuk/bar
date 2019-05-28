@@ -118,13 +118,14 @@ cpuTooltip :: Tooltip
 cpuTooltip = Tooltip tooltipBackground (Size 300 (8*barHeight)) Vertical [
      tooltip cpu #RefreshRate 1 #LinearTime #Height (2*barHeight)
                  #BottomPadding 1 #RightPadding 1 # LeftPadding 1,
+     hseparator,
      tooltipText cpuTop # Height (6 * barHeight)
      ]
 
 memTooltip :: Tooltip
-memTooltip = Tooltip tooltipBackground (Size 450 (6*barHeight)) Horizontal [
+memTooltip = Tooltip tooltipBackground (Size 490 (6*barHeight)) Horizontal [
      tooltipText memstatus #Width 430 #LeftPadding 5,
-     tooltip mem #RefreshRate 1 # Width 20 #LinearTime # LogTime 1
+     tooltip mem #RefreshRate 1 #Width 60 #LogTime 3
      ]
 
 netTooltip :: String -> Tooltip
@@ -138,10 +139,11 @@ batteryGraphTimer :: Period
 batteryGraphTimer = 75
 
 batteryTooltip :: String -> Tooltip
-batteryTooltip name = Tooltip tooltipBackground (Size 380 (barHeight*8)) Vertical [
+batteryTooltip name = Tooltip tooltipBackground (Size 380 (7+barHeight*8)) Vertical [
      tooltip (batteryGraph name) #RefreshRate batteryGraphTimer #Height (barHeight*7)
              # BottomPadding 2  # LeftPadding 2 #RightPadding 2,
-     tooltipText (batteryRate name) # Width 380 # Height barHeight
+     hseparator,
+     tooltipText (batteryRate name) # Width 380 # Height barHeight # BottomPadding 3
      ]
 
 logtm :: Widget -> Widget
@@ -243,6 +245,9 @@ memstatus = MemStatus defaultAttr defaultTAttr 1 #JustifyLeft
 
 label :: Widget
 label = Label defaultAttr defaultTAttr ""
+
+hseparator = Label (WidgetAttributes (Size 1000 1) 0 (Padding 1 1) "#c0c0c0" Nothing Nothing)
+                   defaultTAttr "" # LeftPadding 20 # RightPadding 20
 
 title :: Widget
 title = Title defaultAttr defaultTAttr # Width 4000
@@ -931,7 +936,7 @@ makeWidget rs wd@NetStatus { netdev_ = netdev } = wrapAction epoch filterEv make
 
   printNet n@(_, newts) mb = do
     let (st, o@(_,oldts), msg) =
-          fromMaybe (n, n, ["Loading..."]) mb
+          fromMaybe (n, n, ["Calculating..."]) mb
     let (o', msg') = if diffUTCTime newts oldts < refreshRate wd
          then (o, msg)
          else (n, [fmt "" n o, fmt "Avg" n st])
