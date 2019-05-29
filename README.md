@@ -17,7 +17,10 @@ For configuration options change src/Main.hs before building.
 
 After changing configuration, to build the bar run:
 ```sh
-cabal build
+sudo apt-get install libx11-dev libxinerama-dev libx11-dev libxrandr-dev libxft-dev
+git clone https://github.com/IvanVolosyuk/bar.git
+cd bar
+cabal install
 mkdir ~/.xmonad/bar
 cp dist/build/bar/bar ~/.xmonad/bar/bar
 # Default on-click handlers: top.sh and clock.sh (change in Main.hs)
