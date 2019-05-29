@@ -350,8 +350,11 @@ data RenderState = RenderState {
   windowWidth :: Int,
   windowHeight :: Int,
   windowBackground :: String,
-  screenNum :: ScreenNumber
+  pos :: (Int, Int, Int, Int, Int, Int)
 }
+
+instance Eq RenderState where
+  (==) a b = (window a) == (window b)
 
 data WindowState = WindowState RenderState [Widget]
 
@@ -563,7 +566,7 @@ makeBar dpy controlCh (Bar bg height screen gravity wds) = do
        DefaultScreen -> return Nothing
        XineramaScreen x -> maybe Nothing (find (\s -> (xsi_screen_number s) == fi x))
                           <$> xineramaQueryScreens dpy
-  forM_ xiscr $ \x -> print x
+  forM_ xiscr $ \a -> print a
 
   let (scX, scY, scWidth, scHeight) = case xiscr of
        Nothing -> (0, 0, displayWidth dpy scr, displayHeight dpy scr)
@@ -583,7 +586,7 @@ makeBar dpy controlCh (Bar bg height screen gravity wds) = do
 
   rootwin <- rootWindow dpy scr
   w <- createWindow dpy rootwin
-                    0 (fi y) (fi scWidth) (fi height)
+                    (fi scX) (fi y) (fi scWidth) (fi height)
                     0 copyFromParent inputOutput (defaultVisual dpy scr) 0 nullPtr
   gc <- createGC dpy w
   buf <- createPixmap dpy w (fi scWidth) (fi height) (defaultDepth dpy scr)
@@ -591,7 +594,7 @@ makeBar dpy controlCh (Bar bg height screen gravity wds) = do
   let rs = RenderState { display = dpy, window = w, buffer = buf, gc_ = gc,
                          windowWidth = fi scWidth, windowHeight = height,
                          windowBackground = bg,
-                         screenNum = scr}
+                         pos = (fi scX, fi y, fi scX, fi scY, fi scWidth, fi scHeight)}
 
   strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
   changeProperty32 dpy w strutPartial cARDINAL propModeReplace strutValues
@@ -710,28 +713,28 @@ getRefreshRate BatteryStatus { refreshRate = p } = Just p
 getRefreshRate BatteryRate { refreshRate = p } = Just p
 getRefreshRate _ = Nothing
 
-createTooltip :: Display -> (Window, ScreenNumber)
+createTooltip :: Display -> RenderState
               -> Widget -> Tooltip
               -> IO ((WindowDraw,[Period]), Window)
-createTooltip dpy (parent_w, parent_scr) pwd tip = do
+createTooltip dpy parent_rs pwd tip = do
   let Tooltip bg tsz@(Size width height) orien widgets = tip
+  let (px, py, scX, scY, scWidth, scHeight) = (pos parent_rs)
 
-  parent <- getWindowAttributes dpy parent_w
   let WidgetAttributes sz pos _ _ _ _ = attr_ pwd
-  let wpos = Size (fi $ wa_x parent) (fi $ wa_y parent)
-  let place = if y_ wpos == 0
+  let wpos = Size px py
+  let place = if y_ wpos == scY
                  then wpos + pos + sz * dir Vertical - half (tsz-sz) * dir Horizontal - Size 0 0
                  else wpos + pos - half (tsz-sz) * dir Horizontal - tsz * dir Vertical + Size 0 0
-  let screenWidth = fi $ displayWidth dpy parent_scr
-  let x = max 0 $ min (x_ place) (screenWidth - width)
+  let x = max scX $ min (x_ place) (scX + scWidth - width)
+  let scr = defaultScreen dpy
 
   print $ "Enter! Creating Window " ++ show place ++ " wpos " ++ show wpos ++ " size " ++ show tsz
 
-  let visual = defaultVisual dpy parent_scr
+  let visual = defaultVisual dpy scr
       attrmask = cWOverrideRedirect
   w <- allocaSetWindowAttributes $ \attributes -> do
          set_override_redirect attributes True
-         createWindow dpy (rootWindowOfScreen (screenOfDisplay dpy parent_scr))
+         createWindow dpy (rootWindowOfScreen (defaultScreenOfDisplay dpy))
                     (fi x) (fi $ y_ place)
                     (fi width) (fi height) 0 copyFromParent
                     inputOutput visual attrmask attributes
@@ -743,29 +746,30 @@ createTooltip dpy (parent_w, parent_scr) pwd tip = do
   gc <- createGC dpy w
   setLineAttributes dpy gc 1 lineSolid capRound joinRound
 
-  buf <- createPixmap dpy w (fi width) (fi height) (defaultDepth dpy parent_scr)
+  buf <- createPixmap dpy w (fi width) (fi height) (defaultDepth dpy scr)
 
   windowMapAndSelectInput dpy w (structureNotifyMask .|. exposureMask)
   let periods = mapMaybe getRefreshRate widgets
   print periods
 
-  let rs = RenderState dpy w buf gc width height bg parent_scr
+  let rs = RenderState dpy w buf gc width height bg (x, y_ place, scX, scY, scWidth, scHeight)
   let widgetDraws = bgWidget rs : map (makeWidget rs) widgets
   let draw = proc x -> id <<< zipAuto ZNop widgetDraws -< repeat x
   return ((draw, periods), w)
 
 updateTooltip :: Display -> Maybe Window
-              -> Auto IO (Maybe ((Window, ScreenNumber), Widget))
+              -> Auto IO (Maybe (RenderState, Widget))
                          (Maybe (WindowDraw,[Period]))
-updateTooltip dpy oldw = mkAutoM_ $ \inp -> do
-  forM_ oldw (\w -> print "destroy" >> destroyWindow dpy w)
+updateTooltip dpy mbw = mkAutoM_ $ \inp -> do
+  forM_ mbw $ \w -> print "destroy" >> destroyWindow dpy w
+
   case inp of
     Nothing       -> return (Nothing, updateTooltip dpy Nothing)
-    Just (winScr, wd) ->
+    Just (rs, wd) ->
       case mbtooltip $ attr_ wd of
         Nothing -> return (Nothing, updateTooltip dpy Nothing)
         Just tip -> do
-          (tip, neww) <- createTooltip dpy winScr wd tip
+          (tip, neww) <- createTooltip dpy rs wd tip
           return (Just tip, updateTooltip dpy $ Just neww)
 
 tooltipContainer :: Maybe WindowDraw
@@ -788,14 +792,14 @@ tooltipContainer mbtip = mkAutoM_ $ \(newtip, initevts, evts) -> do
       (v, tip') <- e `deepseq` stepAuto tip e
       step tip' xs (v : out)
 
-handleClick :: Auto IO ((Window, ScreenNumber), Widget) ()
+handleClick :: Auto IO (RenderState, Widget) ()
 handleClick = mkFuncM $ \(_, wd) -> do
   print "Click"
   let attr = attr_ wd
   forM_ (onclick attr) runCommand
 
 dataTask :: Display -> Auto IO TimerCollectionInp [(Period, UTCTime)]
-                    -> ((Window, Maybe Size) -> Maybe ((Window, ScreenNumber), Widget))
+                    -> ((Window, Maybe Size) -> Maybe (RenderState, Widget))
                     -> [Auto IO (Period, UTCTime) (Maybe (GraphDef, GraphData))]
                     -> [WidgetDraw]
                     -> Auto IO RootInput ()
@@ -995,7 +999,7 @@ makeWidget rs wd@MemStatus {} = wrapAction epoch filterEv make where
     x <- readKeyValueFile ((`div` 1024) . read . head . words) "/proc/meminfo" :: IO (M.Map String Int)
     let x' = M.insert "Swap" ((x M.! "SwapTotal") - (x M.! "SwapFree")) x
     let values = ["MemFree", "Cached", "Buffers", "Swap", "Dirty", "Hugetlb"]
-    let mem = map (\n -> printf "%7s: %4d MB" n (x' M.! n)) values
+    let mem = map (\n -> printf "%7s: %5d MB" n (x' M.! n)) values
     perPidInfo <- memInfo
     return $ zipWith (++) mem perPidInfo
 
@@ -1056,11 +1060,11 @@ mouseHitWds wds pos =
   let match wd = inbounds (attr_ wd) pos
    in find match wds
 
-mouseHitWins :: [WindowState] -> (Window, Maybe Size) -> Maybe ((Window, ScreenNumber), Widget)
+mouseHitWins :: [WindowState] -> (Window, Maybe Size) -> Maybe (RenderState, Widget)
 mouseHitWins _ (w, Nothing) = Nothing
 mouseHitWins wins (w, Just pos) =
   let matchWin (WindowState rs _) = w == window rs
-      matchWds (WindowState rs wds) = mouseHitWds wds pos >>= \wd -> Just ((window rs, screenNum rs), wd)
+      matchWds (WindowState rs wds) = mouseHitWds wds pos >>= \wd -> Just (rs, wd)
    in find matchWin wins >>= matchWds
 
 initRootTask :: Display -> ControlChan -> [WindowState] -> IO(Auto IO RootInput ())
