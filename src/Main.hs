@@ -44,6 +44,9 @@ import Utils
 barHeight :: Int
 barHeight = 24
 
+defaultFont :: String
+defaultFont = "-*-*-medium-r-normal--15-*-*-*-*-*-iso10646-*"
+
 barBackground :: String
 barBackground = "#BEBEBE"
 
@@ -52,6 +55,9 @@ infoBackground = "#181838"
 
 tooltipBackground :: String
 tooltipBackground = "#FFFFC0"
+
+defaultTextColor :: String
+defaultTextColor = "#C7AE86"
 
 trayerCmd :: Int -> Int -> String
 trayerCmd = printf "trayer --expand false --edge top --align right\
@@ -80,7 +86,7 @@ bar1 = Bar barBackground barHeight (XineramaScreen 0) GravityTop [
         battery "BAT1",
         trayer,
 
-        title # LeftPadding 2 # RightPadding 2 #
+        title # LeftPadding 5 # RightPadding 2 #
                 BackgroundColor barBackground #
                 JustifyLeft # TextColor "#000000"
       ]
@@ -120,20 +126,20 @@ cpuTooltip = Tooltip tooltipBackground (Size 300 (8*barHeight)) Vertical [
      tooltip cpu #RefreshRate 1 #LinearTime #Height (2*barHeight)
                  #BottomPadding 1 #RightPadding 1 # LeftPadding 1,
      hseparator,
-     tooltipText cpuTop # Height (6 * barHeight)
+     tooltipText cpuTop
      ]
 
 memTooltip :: Tooltip
 memTooltip = Tooltip tooltipBackground (Size 490 (6*barHeight)) Horizontal [
      tooltipText memstatus #Width 430 #LeftPadding 5,
-     tooltip mem #RefreshRate 1 #Width 60 #LogTime 3
+     tooltip mem #RefreshRate 1 #LogTime 3
      ]
 
 netTooltip :: String -> Tooltip
 netTooltip netdev = Tooltip tooltipBackground (Size 480 (2*barHeight)) Horizontal [
      tooltip (tooltipNet netdev) #RefreshRate 1 #LinearTime # Width 100
             # TopPadding 1 # BottomPadding 1,
-     tooltipText (netstatus netdev) #RefreshRate 3 # Width 380 #JustifyLeft #LeftPadding 10
+     tooltipText (netstatus netdev) #RefreshRate 3 #JustifyLeft #LeftPadding 10
      ]
 
 batteryGraphTimer :: Period
@@ -144,7 +150,7 @@ batteryTooltip name = Tooltip tooltipBackground (Size 380 (7+barHeight*8)) Verti
      tooltip (batteryGraph name) #RefreshRate batteryGraphTimer #Height (barHeight*7)
              # BottomPadding 2  # LeftPadding 2 #RightPadding 2,
      hseparator,
-     tooltipText (batteryRate name) # Width 380 # Height barHeight # BottomPadding 3
+     tooltipText (batteryRate name) # BottomPadding 3
      ]
 
 logtm :: Widget -> Widget
@@ -165,7 +171,7 @@ tooltipLabel :: Widget
 tooltipLabel = tooltipText label
 
 tooltipNet :: String -> Widget
-tooltipNet netdev = Graph defaultAttr (GraphDef (Net netdev) (LogTime 8) 1)
+tooltipNet netdev = Graph defaultAttr (GraphDef (SampleDef 1 $ Net netdev) (LogTime 8))
                     ["#6060FF", tooltipBackground, "#60FF60"]  # Width 129
 
 data Attribute = Width Int | Height Int | LeftPadding Int | RightPadding Int
@@ -199,7 +205,8 @@ data WidgetAttributes = WidgetAttributes {
 -- int = n linear points before 2x compression
 data GraphType = Cpu | Net String | Mem | Battery String deriving (Show,Eq,Ord, Generic, NFData)
 data TimeScale = LinearTime | LogTime Int deriving (Show,Eq,Ord, Generic, NFData)
-data GraphDef = GraphDef { graphType :: GraphType, tscale_ :: TimeScale, period_ :: Period} deriving (Show, Eq, Ord, Generic, NFData)
+data SampleDef = SampleDef {period_ :: Period, type_ :: GraphType} deriving (Show, Eq, Ord, Generic, NFData)
+data GraphDef = GraphDef {sample_ :: SampleDef, tscale_ :: TimeScale} deriving (Show, Eq, Ord, Generic, NFData)
 
 data Bar = Bar String Int Screen Gravity [Widget] deriving Show
 data Tooltip = Tooltip String Size Orientation [Widget] deriving (Show, Eq)
@@ -218,25 +225,25 @@ data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_
           deriving (Show, Eq)
 
 defaultAttr :: WidgetAttributes
-defaultAttr = WidgetAttributes (Size 400 barHeight) 0 (Padding 1 1) infoBackground Nothing Nothing
+defaultAttr = WidgetAttributes (Size 120 barHeight) 0 (Padding 1 1) infoBackground Nothing Nothing
 
 defaultTAttr :: TextAttributes
-defaultTAttr = TextAttributes "#C7AE86" JustifyMiddle "-*-*-medium-r-normal--15-*-*-*-*-*-iso10646-*" barHeight
+defaultTAttr = TextAttributes defaultTextColor JustifyMiddle defaultFont barHeight
 
 clock :: Widget
 clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone 1
 
 cpu :: Widget
-cpu = Graph defaultAttr (GraphDef Cpu (LogTime 8) 1) ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] -- # Width 129
+cpu = Graph defaultAttr (GraphDef (SampleDef 1 Cpu) (LogTime 8)) ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] -- # Width 129
 
 mem :: Widget
-mem = Graph defaultAttr (GraphDef Mem (LogTime 8) 1) ["#00FF00", "#6060FF"] -- # Width 129
+mem = Graph defaultAttr (GraphDef (SampleDef 1 Mem) (LogTime 8)) ["#00FF00", "#6060FF"] -- # Width 129
 
 batteryGraph :: String -> Widget
-batteryGraph name = Graph defaultAttr (GraphDef (Battery name) LinearTime 1) ["#0760F2"]
+batteryGraph name = Graph defaultAttr (GraphDef (SampleDef 1 (Battery name)) LinearTime) ["#0760F2"]
 
 net :: String -> Widget
-net netdev = Graph defaultAttr (GraphDef (Net netdev) (LogTime 8) 1)
+net netdev = Graph defaultAttr (GraphDef (SampleDef 1 (Net netdev)) (LogTime 8))
              ["#6060FF", infoBackground, "#60FF60"] # Width 129 #netTooltip netdev
 
 netstatus :: String -> Widget
@@ -252,7 +259,7 @@ hseparator = Label (WidgetAttributes (Size 1000 1) 0 (Padding 1 1) "#c0c0c0" Not
                    defaultTAttr "" # LeftPadding 20 # RightPadding 20
 
 title :: Widget
-title = Title defaultAttr defaultTAttr # Width 4000
+title = Title defaultAttr defaultTAttr
 
 cpuTop :: Widget
 cpuTop = CpuTop defaultAttr defaultTAttr 3 # JustifyLeft
@@ -308,7 +315,7 @@ instance Apply Attribute where
                                                      WidgetAttributes ws x p c cmd tip
   apply (TimeFormat fmt) ww = ww { fmt_ = fmt }
   apply (Message s) ww = ww { label_ = s }
-  apply (RefreshRate r) ww@(Graph _ def _) = ww { graph_ = def {period_ = r }}
+  apply (RefreshRate r) ww@(Graph _ def@GraphDef{sample_ = s} _) = ww { graph_ = def {sample_ = s { period_ = r }}}
   apply (RefreshRate r) ww = ww { refreshRate = r }
 
 infixl 9 #
@@ -509,9 +516,12 @@ layoutWidget wpos ort wsz wd =
    in (newpos, [wd { attr_ = wa'' }])
 
 layoutWidgets :: Orientation -> Size -> [Widget] -> [Widget]
-layoutWidgets orien wsz =
-  concat . snd . mapAccumL (layoutWidget (Size 0 0) orien) wsz
-
+layoutWidgets orien wsz wds =
+  let (pos, ar) = mapAccumL (layoutWidget (Size 0 0) orien) wsz wds
+      (first : others) = reverse $ concat ar
+      change = pos * dir orien
+      update wa = wa { position = position wa - change, size = size wa + change } in
+  (withAttr first update : others)
 
 windowMapAndSelectInput :: Display -> Window -> Word64 -> IO ()
 windowMapAndSelectInput dpy w mask = do
@@ -550,10 +560,10 @@ checkNetdev wd n = do
   net <- readNetFile "/proc/net/dev"
   return $ if M.member n net then Just wd else Nothing
 
-removeBroken wd@Graph {graph_ = (GraphDef (Battery n) _ _)} = checkBattery wd n
+removeBroken wd@Graph {graph_ = GraphDef {sample_ = SampleDef {type_ = Battery n}}} = checkBattery wd n
 removeBroken wd@BatteryRate {batteryName = n} = checkBattery wd n
 removeBroken wd@BatteryStatus {batteryName = n} = checkBattery wd n
-removeBroken wd@Graph {graph_ = (GraphDef (Net n) _ _)} = checkNetdev wd n
+removeBroken wd@Graph {graph_ = GraphDef {sample_ = SampleDef {type_ = Net n}}} = checkNetdev wd n
 removeBroken wd@NetStatus {netdev_ = n} = checkNetdev wd n
 removeBroken wd = return $ Just wd
 
@@ -676,7 +686,7 @@ sampleTask (Net netdev) =
 
 
 createGraph :: (GraphDef,Int) -> Auto IO (Period, UTCTime) (Maybe (GraphDef, GraphData))
-createGraph (def@(GraphDef typ tscale period), ws) = proc t -> do
+createGraph (def@(GraphDef (SampleDef period typ) tscale), ws) = proc t -> do
     matchPeriod <- emitOn (period ==) -< fst t
     sample <- perBlip (sampleTask typ) -< matchPeriod
     sample2 <- dropB (drops typ) -< sample -- drop initial bad sample
@@ -703,7 +713,7 @@ combinePaints paints = M.elems $ foldr f M.empty paints where
 data ZEvent = ZNop | REv !RootInput | TEv !(Period, UTCTime)
                    | GEv !(GraphDef, GraphData) deriving (Show, Generic, NFData)
 
-getRefreshRate Graph {graph_ = (GraphDef _ _ p)} = Just p
+getRefreshRate Graph {graph_ = GraphDef {sample_ = SampleDef {period_ = p}}} = Just p
 -- FIXME: reduce duplication
 getRefreshRate CpuTop { refreshRate = p } = Just p
 getRefreshRate Clock { refreshRate = p } = Just p
