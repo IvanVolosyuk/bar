@@ -575,11 +575,11 @@ makeBar dpy controlCh (Bar bg height screen gravity wds) = do
   let (y, strutValues) = if gravity == GravityTop
       then (scY,    [0, 0, fi scY + fi height, 0,
                      0, 0, 0, 0,
-                     fi scX, fi scX + fi scWidth, 0, 0])
+                     fi scX, fi scX + fi scWidth - 1, 0, 0])
       else (scY + fi scHeight - fi height,
                     [0, 0, 0, fi scY + fi height,
                      0, 0, 0, 0,
-                     0, 0, fi scX, fi scX + fi scWidth ])
+                     0, 0, fi scX, fi scX + fi scWidth - 1])
 
   rootwin <- rootWindow dpy scr
   w <- createWindow dpy rootwin

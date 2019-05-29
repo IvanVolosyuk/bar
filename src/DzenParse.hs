@@ -57,7 +57,7 @@ parseMessage fg bg s =
 mergeText :: [Message] -> [Message]
 mergeText [] = []
 mergeText (t1@(Text fg1 bg1 s1) : t2@(Text fg2 bg2 s2 : xs)) = 
-  if fg1 == fg2 || bg1 == bg2
+  if fg1 == fg2 && bg1 == bg2
   then mergeText (Text fg1 bg1 (s1 ++ s2) : xs)
   else t1 : mergeText t2
 mergeText (x : xs) = x : mergeText xs
