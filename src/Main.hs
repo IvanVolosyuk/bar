@@ -65,7 +65,7 @@ trayerCmd = printf "trayer --expand false --edge top --align right\
 
 -- Tooltip graphs refreshing while hidden
 persistentTimers :: [Period]
-persistentTimers = [batteryGraphTimer]
+persistentTimers = [batteryGraphTimer, netstatusRefresh]
 
 bars :: [Bar]
 --bars = [bar1, bar2]
@@ -246,8 +246,11 @@ net :: String -> Widget
 net netdev = Graph defaultAttr (GraphDef (SampleDef 1 (Net netdev)) (LogTime 8))
              ["#6060FF", infoBackground, "#60FF60"] # Width 129 #netTooltip netdev
 
+netstatusRefresh :: NominalDiffTime
+netstatusRefresh = 3
+
 netstatus :: String -> Widget
-netstatus = NetStatus defaultAttr defaultTAttr 1
+netstatus = NetStatus defaultAttr defaultTAttr netstatusRefresh
 
 memstatus :: Widget
 memstatus = MemStatus defaultAttr defaultTAttr 1 #JustifyLeft
@@ -440,8 +443,8 @@ updateGraph _ (LogGraph n g) s = g `deepseq` LogGraph n $ updateLayer g s where
     | otherwise = (v:vv):xs
 
 exportGraph :: GraphData -> [[Int]]
-exportGraph (LinearGraph g) = transpose g
-exportGraph (LogGraph n g) = transpose $ concatMap (take' n) g where
+exportGraph (LinearGraph g) = g
+exportGraph (LogGraph n g) = concatMap (take' n) g where
   take' n' ar = let (a,b) = splitAt (n'-1) ar in a ++ (case b of
        [] -> []
        _ -> [avgSamp b])
@@ -642,8 +645,7 @@ layers (Battery _) = 1
 drops Mem = 0
 drops _ = 1
 
-scaleG (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*graphScale)) vals
-graphScale = 10000
+scaleG hs (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*hs)) vals
 readCPU = map read . tail. words . head . lines <$> readFully "/proc/stat"
 
 readNet :: String -> IO ([Int], UTCTime)
@@ -697,7 +699,7 @@ createGraph (def@(GraphDef (SampleDef period typ) tscale), ws) = proc t -> do
     matchPeriod <- emitOn (period ==) -< fst t
     sample <- perBlip (sampleTask typ) -< matchPeriod
     sample2 <- dropB (drops typ) -< sample -- drop initial bad sample
-    graph <- perBlip getGraph <<< seqer -< fmap (scaleG . reverse . tail . scanl (+) 0) sample2
+    graph <- perBlip getGraph <<< seqer -< sample2
     id <<< seqer <<< asMaybes -< fmap (\x -> (def, x)) graph
   where
     getGraph = proc samp ->
@@ -947,8 +949,7 @@ makeWidget rs wd@(Graph attr def colors) = wrapAction (LinearGraph []) filterEv 
     painter = mkFuncM $ \grdata -> do
       let WidgetAttributes sz pos  _ bg _ _ = attr
           (Size ws hs, Size x0 y0) = (sz, pos)
-      let scale = graphScale `div` hs
-      let samp = map (map (`div` scale)) $ exportGraph grdata
+      let samp = transpose . fmap (scaleG hs . reverse . tail . scanl (+) 0) . exportGraph $ grdata
       let colorTable = map toColor colors
       withDraw rs $ \d -> do
         drawRect (display rs) d bg x0 y0 ws hs
@@ -963,12 +964,14 @@ makeWidget rs wd@NetStatus { netdev_ = netdev, refreshRate = r} =
     wrapAction (LinearGraph []) filterEv make where
   filterEv (GEv (def', grdata)) | GraphDef (SampleDef r $ Net netdev) LinearTime == def' = Just $ InOut grdata
   filterEv (REv (RExpose w))  | w == window rs  = Just Out
+  filterEv _     = Nothing
 
   fmt :: String -> [Int] -> String
   fmt hdr v =
-    let [inbound, _, outbound] = map (fmtBytes . round . (/realToFrac r) . revf3 . fromIntegral) v
+    let [inbound, _, outbound, _] = map (fmtBytes . round . (/realToFrac r) . revf3 . fromIntegral) v
      in printf "%s In: %s/s : Out: %s/s" hdr inbound outbound
 
+  printNet (LinearGraph []) = return ["Loading..."]
   printNet (LinearGraph samples@(sample:_)) =
     return [fmt "" sample, fmt "Avg" $ avgSamp samples ]
 
@@ -1057,7 +1060,7 @@ makeWidget _ _ = proc ev -> do
 
 extractGraphs :: Widget -> [(GraphDef, Int)]
 extractGraphs (Graph attr graph _) = [(graph, x_ $ size attr)]
-extractGraphs NetStatus {refreshRate = r, netdev_ = n} = [(GraphDef (SampleDef r (Net n)) LinearTime, 60)]
+extractGraphs NetStatus {refreshRate = r, netdev_ = n} = [(GraphDef (SampleDef r (Net n)) LinearTime, 20)]
 extractGraphs _ = []
 
 extractAllGraphs wd = extractGraphs wd ++ fromTooltip where
