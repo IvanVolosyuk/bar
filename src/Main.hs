@@ -375,7 +375,7 @@ drawMessage :: RenderState -> WidgetAttributes -> TextAttributes
                -> XftFont -> XftDraw -> (IconCache, Size)
                -> Message -> IO (IconCache, Size)
 drawMessage rs attr tattr font d (icons, off) (Text fg bg msg) = do
-  let WidgetAttributes sz pos  _ _ _ _ = attr
+  let WidgetAttributes sz pos  _ wbg _ _ = attr
   let TextAttributes wfg justify _ ths = tattr
   let dpy = display rs
   glyphInfo <- xftTextExtents dpy font msg
@@ -388,7 +388,7 @@ drawMessage rs attr tattr font d (icons, off) (Text fg bg msg) = do
                   JustifyRight ->  ws - txoff
   let y' = y + ((ths + dy) `div` 2)
   let fg' = fromMaybe wfg fg
-  forM_ bg $ \c -> drawRect dpy d c (x + xoff) (y + yoff) ws ths
+  drawRect dpy d (fromMaybe wbg bg) (x + xoff) (y + yoff) ws ths
   withColor dpy fg' $ \c -> xftDrawString d c font (x' + xoff) (y' + yoff) msg
   return (icons, Size (xoff + txoff) yoff)
 
