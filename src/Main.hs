@@ -22,7 +22,8 @@ import Data.Word
 import Foreign.Ptr
 import GHC.Generics (Generic)
 import Graphics.X11.Xft
-import Graphics.X11.Xlib
+import Graphics.X11.Xinerama
+import Graphics.X11.Xlib hiding (Screen)
 import Graphics.X11.Xlib.Extras
 import Graphics.X11.Xrender
 import Numeric
@@ -65,7 +66,7 @@ bars :: [Bar]
 bars = [bar1]
 
 bar1 :: Bar
-bar1 = Bar barBackground barHeight {-screen-} 0 GravityTop [
+bar1 = Bar barBackground barHeight (XineramaScreen 0) GravityTop [
         clock # TimeFormat "%R" # RefreshRate 60 # OnClick "clock.sh"
               # Width 60 # RightPadding 4
               # LocalTimeZone # BackgroundColor infoBackground
@@ -85,8 +86,8 @@ bar1 = Bar barBackground barHeight {-screen-} 0 GravityTop [
       ]
 
 bar2 :: Bar
-bar2 = Bar barBackground (barHeight*2) {-screen-} 0 GravityTop [
-        clock # TimeFormat "%R" # 
+bar2 = Bar barBackground (barHeight*2) (XineramaScreen 0) GravityTop [
+        clock # TimeFormat "%R" #
             Width 60 # RightPadding 4 #
             LocalTimeZone # BackgroundColor infoBackground #
             clockTooltip,
@@ -102,7 +103,7 @@ clockTooltip = Tooltip tooltipBackground (Size 460 (barHeight * 4)) Horizontal [
                          tooltipClock #OtherTimeZone "GMT",
                          tooltipClock #OtherTimeZone "America/Los_Angeles"
                                        -- 0527 06:17:59.956236
-                                      #TimeFormat "%m%d %H:%M:%S", 
+                                      #TimeFormat "%m%d %H:%M:%S",
                          tooltipClock #OtherTimeZone "America/Los_Angeles",
                          tooltipClock
                        ] #Width 340,
@@ -180,6 +181,7 @@ type Pos = Size
 type OnClickCmd = String
 
 data Gravity = GravityTop | GravityBottom deriving (Show, Eq)
+data Screen = DefaultScreen | XineramaScreen Int deriving (Show, Eq)
 data Orientation = Horizontal | Vertical deriving (Show, Eq)
 
 data ClockTimeZone = LocalTimeZone | OtherTimeZone String deriving (Show, Eq)
@@ -199,7 +201,7 @@ data GraphType = Cpu | Net String | Mem | Battery String deriving (Show,Eq,Ord, 
 data TimeScale = LinearTime | LogTime Int deriving (Show,Eq,Ord, Generic, NFData)
 data GraphDef = GraphDef { graphType :: GraphType, tscale_ :: TimeScale, period_ :: Period} deriving (Show, Eq, Ord, Generic, NFData)
 
-data Bar = Bar String Int ScreenNumber Gravity [Widget] deriving Show
+data Bar = Bar String Int Screen Gravity [Widget] deriving Show
 data Tooltip = Tooltip String Size Orientation [Widget] deriving (Show, Eq)
 
 data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_ :: String, tz_ :: ClockTimeZone, refreshRate :: Period }
@@ -554,29 +556,40 @@ removeBroken wd = return $ Just wd
 
 
 makeBar :: Display -> ControlChan -> Bar -> IO WindowState
-makeBar dpy controlCh (Bar bg height scr gravity wds) = do
-  let width = fi $ displayWidth dpy scr
-  let scrHeight = displayHeight dpy scr
+makeBar dpy controlCh (Bar bg height screen gravity wds) = do
+
+  let scr = defaultScreen dpy
+  xiscr <- case screen of
+       DefaultScreen -> return Nothing
+       XineramaScreen x -> maybe Nothing (find (\s -> (xsi_screen_number s) == fi x))
+                          <$> xineramaQueryScreens dpy
+  forM_ xiscr $ \x -> print x
+
+  let (scX, scY, scWidth, scHeight) = case xiscr of
+       Nothing -> (0, 0, displayWidth dpy scr, displayHeight dpy scr)
+       Just xi -> (xsi_x_org xi, xsi_y_org xi, fi (xsi_width xi), fi (xsi_height xi))
 
   -- left, right, top, bottom,
   -- left_start_y, left_end_y, right_start_y, right_end_y,
   -- top_start_x, top_end_x, bottom_start_x, bottom_end_x
   let (y, strutValues) = if gravity == GravityTop
-      then (0, [0, 0, fi height, 0,
+      then (scY,    [0, 0, fi scY + fi height, 0,
                      0, 0, 0, 0,
-                     0, fi width, 0, 0])
-      else (fi scrHeight - height, [0, 0, 0, fi height,
+                     fi scX, fi scX + fi scWidth, 0, 0])
+      else (scY + fi scHeight - fi height,
+                    [0, 0, 0, fi scY + fi height,
                      0, 0, 0, 0,
-                     0, 0, 0, fi width ])
+                     0, 0, fi scX, fi scX + fi scWidth ])
 
-  w <- createWindow dpy (rootWindowOfScreen (screenOfDisplay dpy scr))
-                    0 (fi y) (fi width) (fi height)
+  rootwin <- rootWindow dpy scr
+  w <- createWindow dpy rootwin
+                    0 (fi y) (fi scWidth) (fi height)
                     0 copyFromParent inputOutput (defaultVisual dpy scr) 0 nullPtr
   gc <- createGC dpy w
-  buf <- createPixmap dpy w (fi width) (fi height) (defaultDepth dpy scr)
+  buf <- createPixmap dpy w (fi scWidth) (fi height) (defaultDepth dpy scr)
 
   let rs = RenderState { display = dpy, window = w, buffer = buf, gc_ = gc,
-                         windowWidth = width, windowHeight = height,
+                         windowWidth = fi scWidth, windowHeight = height,
                          windowBackground = bg,
                          screenNum = scr}
 
@@ -597,7 +610,7 @@ makeBar dpy controlCh (Bar bg height scr gravity wds) = do
                               .|. pointerMotionMask
 
   wds' <- catMaybes <$> mapM removeBroken wds
-  let widgets = layoutWidgets Horizontal (Size width height) wds'
+  let widgets = layoutWidgets Horizontal (Size (fi scWidth) height) wds'
   return $ WindowState rs widgets
 
 getMotionEvent :: RootInput -> Maybe (Window, Maybe Size)
@@ -801,7 +814,7 @@ dataTask dpy timerTask mouse graphs widgets = proc evt -> do
     let tooltipTimers :: Blip (M.Map Period Int)
         tooltipTimers = fmap (M.fromList . flip zip (repeat 1) . maybe [] snd) tooltipChange
     prevTooltipTimers <- delay_ M.empty <<< holdWith_ M.empty -< tooltipTimers
-    let tooltipTimerChange = prevTooltipTimers `deepseq` fmap (TCChangeUsage . M.toList . M.unionWith (+) (fmap (0-) prevTooltipTimers)) tooltipTimers 
+    let tooltipTimerChange = prevTooltipTimers `deepseq` fmap (TCChangeUsage . M.toList . M.unionWith (+) (fmap (0-) prevTooltipTimers)) tooltipTimers
     perBlip (dump "TimerChange") -< tooltipTimerChange
 
     timerBlip <- onJusts <<< arrM getRootTickEvents -< evt
@@ -877,11 +890,11 @@ wrapAction dflt filterEv action = proc ev -> do
 
 filterTimer rs wd (TEv (ival, t))   | Just ival == getRefreshRate wd  = Just $ InOut t
 filterTimer rs wd (REv (RExpose w)) | w == window rs                  = Just Out
-filterTimer _  _  _     = Nothing 
+filterTimer _  _  _     = Nothing
 
 bgWidget rs = wrapAction () filterEv paint' where
   filterEv (REv (RExpose w)) | w == window rs  = Just Out
-  filterEv _     = Nothing 
+  filterEv _     = Nothing
   paint' = effect $ do
     let RenderState dpy ww b gc w h bg _ = rs
     withDraw rs $ \d -> drawRect dpy d bg 0 0 w h
@@ -891,7 +904,7 @@ makeWidget :: RenderState -> Widget -> WidgetDraw
 makeWidget rs wd@Title {} = wrapAction [""] filterEv (mkDrawStringWidget rs wd)where
     filterEv (REv (RTitle s)) = Just $ InOut [s]
     filterEv (REv (RExpose w)) | w == window rs  = Just Out
-    filterEv _     = Nothing 
+    filterEv _     = Nothing
 
 makeWidget rs wd@Clock { refreshRate = rate } = wrapAction epoch (filterTimer rs wd) make where
   make = proc t -> do
@@ -904,12 +917,12 @@ makeWidget rs wd@Clock { refreshRate = rate } = wrapAction epoch (filterTimer rs
 
 makeWidget rs wd@Label { label_ = msg } = wrapAction [msg] filterEv (mkDrawStringWidget rs wd) where
     filterEv (REv (RExpose w)) | w == window rs  = Just Out
-    filterEv _     = Nothing 
-   
+    filterEv _     = Nothing
+
 makeWidget rs wd@(Graph attr def colors) = wrapAction (LinearGraph []) filterEv painter where
     filterEv (GEv (def', grdata)) | def == def'  = Just $ InOut grdata
     filterEv (REv (RExpose w))  | w == window rs  = Just Out
-    filterEv _     = Nothing 
+    filterEv _     = Nothing
     painter = mkFuncM $ \grdata -> do
       let WidgetAttributes sz pos  _ bg _ _ = attr
           (Size ws hs, Size x0 y0) = (sz, pos)
@@ -924,7 +937,7 @@ makeWidget rs wd@(Graph attr def colors) = wrapAction (LinearGraph []) filterEv 
         mapM_ (drawColorSegment rs) $ zip segments colorTable
       -- FIXME: update only changed part
       return (rs, getBounds wd)
-    
+
 makeWidget rs wd@NetStatus { netdev_ = netdev } = wrapAction epoch filterEv make where
   filterEv = filterTimer rs wd
 
@@ -1040,7 +1053,7 @@ inbounds WidgetAttributes {size = (Size ws hs), position = (Size wx wy)} (Size x
 
 mouseHitWds :: [Widget] -> Size -> Maybe Widget
 mouseHitWds wds pos =
-  let match wd = inbounds (attr_ wd) pos 
+  let match wd = inbounds (attr_ wd) pos
    in find match wds
 
 mouseHitWins :: [WindowState] -> (Window, Maybe Size) -> Maybe ((Window, ScreenNumber), Widget)
@@ -1052,7 +1065,7 @@ mouseHitWins wins (w, Just pos) =
 
 initRootTask :: Display -> ControlChan -> [WindowState] -> IO(Auto IO RootInput ())
 initRootTask dpy ch wins = do
-  forkIO $ forever $ 
+  forkIO $ forever $
     tryIOError getLine >>= \case
       Left _ -> writeChan ch RExit
       Right line -> writeChan ch (RTitle line)
@@ -1083,7 +1096,7 @@ eventLoop dpy ch auto = do
 
        MotionEvent {ev_x = x, ev_y = y, ev_window = ww} ->
          return $ RMotion ww $ Just (Size (fi x) (fi y))
-       
+
        e@CrossingEvent {ev_x = x, ev_y = y, ev_window = ww} ->
          if ev_event_type e == enterNotify
             then return $ RMotion ww $ Just (Size (fi x) (fi y))
