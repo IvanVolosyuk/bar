@@ -663,7 +663,7 @@ revf3 :: Double -> Double
 revf3 x = exp (x ** (1/3)) - 1 + 0.5
 
 sampleTask :: GraphType -> Auto IO Period [Int]
-sampleTask Cpu = seqer <<< proc t -> id <<< mkState calcCpu [0,0,0] <<< effect readCPU -< t where
+sampleTask Cpu = seqer <<< proc t -> id <<< mkState calcCpu [0,0,0,0,0] <<< seqer <<< effect readCPU -< t where
    calcCpu n o =
      let (user:nice:sys:idle:io:_) = ($!) zipWith (-) n o
       in ([sys + io, nice, user, idle], n)
@@ -672,12 +672,14 @@ sampleTask Mem = mkConstM $ do
     mem <- readBatteryFile "/proc/meminfo"
     let [total,free,cached] = ($!) map (read . (mem !))
            ["MemTotal", "MemFree", "Cached"]
-    return [total - free - cached, cached, free]
+        out = [total - free - cached, cached, free]
+    out `deepseq` return out
 
 sampleTask (Battery n) = mkConstM $ do
     capacity <- readBatteryInt n "energy_full"
     remainingCapacity <- readBatteryInt n "energy_now"
-    return [remainingCapacity, capacity - remainingCapacity]
+    let out = [remainingCapacity, capacity - remainingCapacity]
+    out `deepseq` return out
 
 sampleTask (Net netdev) =
     seqer <<< proc t -> id <<< mkState_ calcNet ([0,0], epoch) <<< effect (readNet netdev) -< t
@@ -693,13 +695,16 @@ sampleTask (Net netdev) =
               [inbound, maxspeed - inbound - outbound, outbound, 0] :: [Int]
        in (output, (n, nts)) :: ([Int], ([Int], UTCTime))
 
-
-createGraph :: (GraphDef,Int) -> Auto IO (Period, UTCTime) (Maybe (GraphDef, GraphData))
-createGraph (def@(GraphDef (SampleDef period typ) tscale), ws) = proc t -> do
+createSample :: SampleDef -> Auto IO (Period, UTCTime) (Blip (SampleDef, [Int]))
+createSample sampdef@(SampleDef period typ) = proc t -> do
     matchPeriod <- emitOn (period ==) -< fst t
     sample <- perBlip (sampleTask typ) -< matchPeriod
-    sample2 <- dropB (drops typ) -< sample -- drop initial bad sample
-    graph <- perBlip getGraph <<< seqer -< sample2
+    id <<< seqer <<< dropB (drops typ) -< fmap (\s -> (sampdef, s)) sample
+
+createGraph :: (GraphDef,Int) -> Auto IO (Blip (SampleDef, [Int])) (Maybe (GraphDef, GraphData))
+createGraph (def@(GraphDef sample tscale), ws) = proc samp -> do
+    matchSamp <- filterB (\s -> fst s == sample) -< samp
+    graph <- perBlip getGraph <<< seqer -< fmap snd matchSamp
     id <<< seqer <<< asMaybes -< fmap (\x -> (def, x)) graph
   where
     getGraph = proc samp ->
@@ -819,10 +824,11 @@ handleClick = mkFuncM $ \(_, wd) -> do
 
 dataTask :: Display -> Auto IO TimerCollectionInp [(Period, UTCTime)]
                     -> ((Window, Maybe Size) -> Maybe (RenderState, Widget))
-                    -> [Auto IO (Period, UTCTime) (Maybe (GraphDef, GraphData))]
+                    -> [Auto IO (Period, UTCTime) (Blip (SampleDef, [Int]))]
+                    -> [Auto IO (Blip (SampleDef, [Int])) (Maybe (GraphDef, GraphData))]
                     -> [WidgetDraw]
                     -> Auto IO RootInput ()
-dataTask dpy timerTask mouse graphs widgets = proc evt -> do
+dataTask dpy timerTask mouse samples graphs widgets = proc evt -> do
     -- dump "Event === " -< evt
 
     tooltipChangeReq <- onChange_ <<< holdWith_ Nothing
@@ -846,7 +852,8 @@ dataTask dpy timerTask mouse graphs widgets = proc evt -> do
     timerCollectionEvts <- fromBlips TCNop -< timerCollectBlips
     timerEvts <- timerTask -< timerCollectionEvts
     -- accelOverList $ dump "Timers === " -< timerEvts
-    dataBlips <- accelOverList $ zipAuto dummy graphs -< map repeat timerEvts
+    sampBlips <- accelOverList $ zipAuto dummy samples -< map repeat timerEvts
+    dataBlips <- accelOverList $ zipAuto NoBlip graphs -< map repeat (concat sampBlips)
     let graphChanges :: [(GraphDef, GraphData)]
         graphChanges = catMaybes . concat $ dataBlips
     latestGraphs <- map GEv . M.toList <$> accum_ (foldr (\(k,v) m -> M.insert k v m)) M.empty -< graphChanges
@@ -863,6 +870,7 @@ dataTask dpy timerTask mouse graphs widgets = proc evt -> do
     id -< ()
   where
     dummy = (1, epoch)
+
     updateGraphSet st inp = S.union st $ S.fromList inp
     updateWindow (RenderState {display = dpy, buffer = buf, window = w, gc_ = gc},
                   Rectangle x y width height) = do
@@ -1094,12 +1102,17 @@ initRootTask dpy ch wins = do
   let graphs = concatMap extractAllGraphs $ concatMap getWidgets wins
       uniq_graphs = M.toList . foldr (\(k,v) m -> M.insertWith max k v m) M.empty $ graphs
       graphs' = map createGraph uniq_graphs
+
+      sampledefs = map (sample_ . fst) uniq_graphs 
+      uniq_sdef = S.toList $ S.fromList sampledefs
+      samples = map createSample uniq_sdef
+
       mouse = mouseHitWins wins
       widgets = concatMap mkWindow wins
       periods = mapMaybe getRefreshRate $ concatMap getWidgets wins
       timers = timerTask ch
   (_, timers') <- stepAuto timers . TCChangeUsage $ zip (periods ++ persistentTimers) (repeat 1)
-  return $ dataTask dpy timers' mouse graphs' widgets where
+  return $ dataTask dpy timers' mouse samples graphs' widgets where
         getWidgets (WindowState _ wds) = wds
         mkWindow (WindowState rs wds) = bgWidget rs : map (makeWidget rs) wds
 
