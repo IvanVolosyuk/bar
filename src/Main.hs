@@ -653,6 +653,13 @@ readNet netdev = do
   let inout = ($!) getNetBytes (net ! netdev)
   return (inout, ts)
 
+f3 :: Double -> Double
+f3 x = f x * f x * f x where
+  f x = log (x + 1)
+
+revf3 :: Double -> Double
+revf3 x = exp (x ** (1/3)) - 1 + 0.5
+
 sampleTask :: GraphType -> Auto IO Period [Int]
 sampleTask Cpu = seqer <<< proc t -> id <<< mkState calcCpu [0,0,0] <<< effect readCPU -< t where
    calcCpu n o =
@@ -676,10 +683,10 @@ sampleTask (Net netdev) =
     calcNet :: ([Int], UTCTime) -> ([Int], UTCTime) -> ([Int], ([Int], UTCTime))
     calcNet (n, nts) (o, ots) =
       let f x = log (x + 1)
-          f2 x = f x * f x * f x
+          f3 x = f x * f x * f x
           dt = getDt nts ots :: Double
-          [inbound, outbound] = ($!) map (f2 . fromIntegral) $ zipWith (-) n o :: [Double]
-          maxspeed = f2 $ dt * 100000000 :: Double
+          [inbound, outbound] = ($!) map (f3 . fromIntegral) $ zipWith (-) n o :: [Double]
+          maxspeed = f3 $ dt * 100000000 :: Double
           output = ($!) map (truncate . max 0)
               [inbound, maxspeed - inbound - outbound, outbound, 0] :: [Int]
        in (output, (n, nts)) :: ([Int], ([Int], UTCTime))
@@ -952,25 +959,21 @@ makeWidget rs wd@(Graph attr def colors) = wrapAction (LinearGraph []) filterEv 
       -- FIXME: update only changed part
       return (rs, getBounds wd)
 
-makeWidget rs wd@NetStatus { netdev_ = netdev } = wrapAction epoch filterEv make where
-  filterEv = filterTimer rs wd
+makeWidget rs wd@NetStatus { netdev_ = netdev, refreshRate = r} =
+    wrapAction (LinearGraph []) filterEv make where
+  filterEv (GEv (def', grdata)) | GraphDef (SampleDef r $ Net netdev) LinearTime == def' = Just $ InOut grdata
+  filterEv (REv (RExpose w))  | w == window rs  = Just Out
 
-  fmt :: String -> ([Int], UTCTime) -> ([Int], UTCTime) -> String
-  fmt hdr (n, newts) (o, oldts) =
-    let dt = getDt newts oldts
-        [inbound, outbound] = map (fmtBytes . perSec dt) $ zipWith (-) n o
+  fmt :: String -> [Int] -> String
+  fmt hdr v =
+    let [inbound, _, outbound] = map (fmtBytes . round . (/realToFrac r) . revf3 . fromIntegral) v
      in printf "%s In: %s/s : Out: %s/s" hdr inbound outbound
 
-  printNet n@(_, newts) mb = do
-    let (st, o@(_,oldts), msg) =
-          fromMaybe (n, n, ["Calculating..."]) mb
-    let (o', msg') = if diffUTCTime newts oldts < refreshRate wd
-         then (o, msg)
-         else (n, [fmt "" n o, fmt "Avg" n st])
-    return (msg', Just (st, o', msg'))
+  printNet (LinearGraph samples@(sample:_)) =
+    return [fmt "" sample, fmt "Avg" $ avgSamp samples ]
 
   make = proc t -> do
-    msg <- mkStateM_ printNet Nothing <<< seqer <<< effect (readNet netdev) -< t
+    msg <- mkFuncM printNet  -< t
     id <<< mkDrawStringWidget rs wd -< msg
 
 makeWidget rs wd@CpuTop {} = wrapAction epoch filterEv make where
@@ -1054,6 +1057,7 @@ makeWidget _ _ = proc ev -> do
 
 extractGraphs :: Widget -> [(GraphDef, Int)]
 extractGraphs (Graph attr graph _) = [(graph, x_ $ size attr)]
+extractGraphs NetStatus {refreshRate = r, netdev_ = n} = [(GraphDef (SampleDef r (Net n)) LinearTime, 60)]
 extractGraphs _ = []
 
 extractAllGraphs wd = extractGraphs wd ++ fromTooltip where
