@@ -724,7 +724,7 @@ combinePaints paints = M.elems $ foldr f M.empty paints where
   f (rs, rect) = M.insertWith merge (window rs) (rs, rect)
   merge (rs, rect1) (_, rect2) = (rs, mergeRect rect1 rect2)
 
-data ZEvent = ZNop | REv !RootInput | TEv !(Period, UTCTime)
+data ZEvent = ZNop | REv !RootInput | TEv !(Period, UTCTime) | ZInit UTCTime
                    | GEv !(GraphDef, GraphData) deriving (Show, Generic, NFData)
 
 getRefreshRate Graph {graph_ = GraphDef {sample_ = SampleDef {period_ = p}}} = Just p
@@ -800,7 +800,9 @@ tooltipContainer :: Maybe WindowDraw
                  -> Auto IO (Blip (Maybe WindowDraw), [ZEvent], [ZEvent]) [DrawResult]
 tooltipContainer mbtip = mkAutoM_ $ \(newtip, initevts, evts) -> do
   (initres, mbtip') <- case newtip of
-         Blip (Just t) -> step t initevts []
+         Blip (Just t) -> do
+              ts <- getCurrentTime
+              step t (ZInit ts:initevts) []
          Blip Nothing -> return ([], Nothing)
          _ -> return ([], mbtip)
   case mbtip' of
@@ -990,7 +992,10 @@ makeWidget rs wd@NetStatus { netdev_ = netdev, refreshRate = r} =
 makeWidget rs wd@CpuTop {} = wrapAction epoch filterEv make where
   loadavg :: IO String
   loadavg = foldl (\a b -> a++" "++b) "Load avg: " . take 3 . words <$> readFully "/proc/loadavg"
-  filterEv = filterTimer rs wd
+  filterEv (TEv (ival, t))   | Just ival == getRefreshRate wd  = Just $ InOut t
+  filterEv (ZInit ts)                                          = Just $ InOut ts
+  filterEv (REv (RExpose w)) | w == window rs                  = Just Out
+  filterEv _     = Nothing
 
   readProcs :: UTCTime -> IO ([Int], M.Map String (String, Int), UTCTime)
   readProcs ts = do
