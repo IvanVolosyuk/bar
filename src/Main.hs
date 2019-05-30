@@ -900,7 +900,7 @@ mkDrawStringWidget rs@RenderState { display = dpy } wd = proc strings -> do
       (icons', _) <- withDraw rs $ \d -> do
         xftDrawSetClipRectangles d 0 0 [Rectangle (fi x) (fi y) (fi ws) (fi hs)]
         drawRect (display rs) d wbg x y ws hs
-        foldM (drawMessages rs (attr_ wd) (tattr_ wd) fn d) (icons, 0) strings
+        foldM (drawMessages rs (attr_ wd) (tattr_ wd) fn d) (icons, y) strings
       return ((rs, getBounds wd), mkAutoM_ $ draw' icons')
 
 type DrawResult = Maybe (RenderState, Rectangle)
