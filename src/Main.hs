@@ -467,6 +467,7 @@ readBatteryString n x = (head . lines) <$> readFileWithFallback (batteryFile n x
 
 readBatteryInt :: String -> String -> IO Int
 readBatteryInt n x = read <$> readBatteryString n x :: IO Int
+readBatteryDouble n x = read <$> readBatteryString n x :: IO Double
 
 getDt :: Fractional t => UTCTime -> UTCTime -> t
 getDt newTs ts = (/1e12) . fromIntegral . fromEnum $ diffUTCTime newTs ts
@@ -1050,9 +1051,9 @@ makeWidget rs wd@BatteryRate {batteryName = n} = wrapAction epoch filterEv make 
   filterEv = filterTimer rs wd
   make = proc t -> id <<< mkDrawStringWidget rs wd <<< effect makeMessage -< t
   makeMessage = do
-    rate <- readBatteryString n "power_now"
-    let rateDouble = read rate / 1000000 :: Double
-    return . (: []) . printf " Present Rate: %.3f mA" $ rateDouble
+    power <- readBatteryDouble n "power_now"
+    volts <- readBatteryDouble n "voltage_now"
+    return . (: []) $ printf "Current current: %.2f A" $ power / volts
 
 makeWidget rs wd@Trayer {} = mkStateM_ handler Nothing where
   handler (REv RInit) _ = do
