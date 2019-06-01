@@ -364,7 +364,7 @@ data RenderState = RenderState {
 }
 
 instance Eq RenderState where
-  (==) a b = (window a) == (window b)
+  (==) a b = window a == window b
 
 data WindowState = WindowState RenderState [Widget]
 
@@ -578,7 +578,7 @@ makeBar dpy controlCh (Bar bg height screen gravity wds) = do
   let scr = defaultScreen dpy
   xiscr <- case screen of
        DefaultScreen -> return Nothing
-       XineramaScreen x -> maybe Nothing (find (\s -> (xsi_screen_number s) == fi x))
+       XineramaScreen x -> maybe Nothing (find (\s -> xsi_screen_number s == fi x))
                           <$> xineramaQueryScreens dpy
   forM_ xiscr $ \a -> print a
 
@@ -743,7 +743,7 @@ createTooltip :: Display -> RenderState
               -> IO ((WindowDraw,[Period]), Window)
 createTooltip dpy parent_rs pwd tip = do
   let Tooltip bg tsz@(Size width height) orien widgets = tip
-  let (px, py, scX, scY, scWidth, scHeight) = (pos parent_rs)
+  let (px, py, scX, scY, scWidth, scHeight) = pos parent_rs
 
   let WidgetAttributes sz pos _ _ _ _ = attr_ pwd
   let wpos = Size px py
