@@ -960,7 +960,7 @@ makeWidget rs wd@(Graph attr def colors) = wrapAction (LinearGraph []) filterEv 
     painter = mkFuncM $ \grdata -> do
       let WidgetAttributes sz pos  _ bg _ _ = attr
           (Size ws hs, Size x0 y0) = (sz, pos)
-      let samp = transpose . fmap (scaleG hs . reverse . tail . scanl (+) 0) . exportGraph $ grdata
+      let samp = transpose . fmap (scaleG hs . reverse . tail . scanl (+) 0) . take ws . exportGraph $ grdata
       let colorTable = map toColor colors
       withDraw rs $ \d -> do
         drawRect (display rs) d bg x0 y0 ws hs
