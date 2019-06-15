@@ -547,11 +547,13 @@ copyChanToX chan w = do
   ch <- dupChan chan
   d <- openDisplay ""
   a <- internAtom d "BAR_UPDATE" False
-  forever $ do
-     _ <- readChan ch
-     sendClientEvent d a w 0 `catchIOError`  \x -> do
-       print $ "Exception caught: " ++ show x
-       sync d False
+  let copy' idx = do
+        readChan ch
+        sendClientEvent d a w idx `catchIOError`  \x -> do
+           print $ "Exception caught: " ++ show x
+           sync d False
+        copy' $ idx + 1
+  copy' 1
 
 
 checkBattery wd n = do
@@ -1109,7 +1111,7 @@ initRootTask dpy ch wins = do
       uniq_graphs = M.toList . foldr (\(k,v) m -> M.insertWith max k v m) M.empty $ graphs
       graphs' = map createGraph uniq_graphs
 
-      sampledefs = map (sample_ . fst) uniq_graphs 
+      sampledefs = map (sample_ . fst) uniq_graphs
       uniq_sdef = S.toList $ S.fromList sampledefs
       samples = map createSample uniq_sdef
 
@@ -1123,30 +1125,47 @@ initRootTask dpy ch wins = do
         mkWindow (WindowState rs wds) = bgWidget rs : map (makeWidget rs) wds
 
 
-eventLoop :: Display -> RootChan -> Auto IO RootInput () -> IO ()
-eventLoop dpy ch auto = do
-  rootEv <- ($!) allocaXEvent $ \ev -> do
+eventLoop :: Display -> RootChan -> Auto IO RootInput () -> Int -> IO ()
+eventLoop dpy ch auto idx = do
+  (nev,rootEv) <- ($!) allocaXEvent $ \ev -> do
     nextEvent dpy ev
+    let read = read' where
+         read' 0 _ = return []
+         read' n ch = do
+           print ("Read", n)
+           v <- readChan ch
+           vs <- read' (n-1) ch
+           return (v:vs)
     event <- getEvent ev
-    case event of
-       ClientMessageEvent {ev_data = 0:_} -> readChan ch
-       ExposeEvent { ev_window = w } ->      return $ RExpose w
+    let nev = case event of
+          ClientMessageEvent {ev_data = n:_} -> fi n - idx
+          _ -> 0
+    ev <- case event of
+       ClientMessageEvent {} -> read nev ch
+       ExposeEvent { ev_window = w } ->      return [ RExpose w ]
        ButtonEvent {ev_x = x, ev_y = y, ev_window = ww} ->
-         return $ RClick ww $ Size (fi x) (fi y)
+         return [ RClick ww $ Size (fi x) (fi y) ]
 
        MotionEvent {ev_x = x, ev_y = y, ev_window = ww} ->
-         return $ RMotion ww $ Just (Size (fi x) (fi y))
+         return [ RMotion ww $ Just (Size (fi x) (fi y)) ]
 
        e@CrossingEvent {ev_x = x, ev_y = y, ev_window = ww} ->
          if ev_event_type e == enterNotify
-            then return $ RMotion ww $ Just (Size (fi x) (fi y))
-            else return $ RMotion ww Nothing
-       _ -> return RNop
-  (_, auto') <- stepAuto auto rootEv
-  case rootEv of
-    RExit -> print "Exiting..."
-    _ -> eventLoop dpy ch auto'
-
+            then return [ RMotion ww $ Just (Size (fi x) (fi y)) ]
+            else return [ RMotion ww Nothing ]
+       _ -> return []
+    return (nev, ev)
+  let runAutos = runAutos' where
+       runAutos' a [] = return a
+       runAutos' a (x:xs) = do
+           print x
+           (_, a') <- stepAuto a x
+           runAutos' a' xs
+  auto' <- runAutos auto rootEv
+  print ("done", idx)
+  if RExit `elem` rootEv
+  then print "Exiting..."
+  else eventLoop dpy ch auto' (idx + nev)
 main :: IO ()
 main = do
   xSetErrorHandler
@@ -1161,5 +1180,4 @@ main = do
 
   auto <- initRootTask dpy controlCh wins
   (_, auto') <- stepAuto auto RInit
-  eventLoop dpy controlCh auto'
-
+  eventLoop dpy controlCh auto' 0

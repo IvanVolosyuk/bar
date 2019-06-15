@@ -34,10 +34,10 @@ import Utils
 import Graphics.X11.Xlib
 
 data Size = Size {x_ :: Int, y_ :: Int} deriving (Show, Eq, Generic, NFData)
-data RootInput = RNop | RTick | RTitle String | RExpose Window 
+data RootInput =  RTick | RTitle String | RExpose Window
                       | RMotion Window (Maybe Size)
                       | RClick Window Size
-                      | RExit | RInit deriving (Show, Generic, NFData)
+                      | RExit | RInit deriving (Eq, Show, Generic, NFData)
 type RootChan = Chan RootInput
 
 type Period = NominalDiffTime
@@ -101,11 +101,11 @@ timerTask ch = proc inpEvt -> do
     triggered NoBlip = False
 
 
-timerInit :: RootChan -> Period -> TimerAuto 
+timerInit :: RootChan -> Period -> TimerAuto
 timerInit rootCh period = mkAutoM_ $ \case
     TDel -> return (Nothing, timerInit rootCh period)
     _    -> do
-      delayCh <- newChan 
+      delayCh <- newChan
       thr <- forkIO $ forever $ do
         targetTs <- (`addUTCTime` epoch) <$> readChan delayCh
         dt <- diffUTCTime targetTs <$> getCurrentTime
