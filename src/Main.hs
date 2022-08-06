@@ -69,7 +69,7 @@ bar1 = Bar barBackground barHeight (XineramaScreen 0) GravityTop [
               # Width 60 # RightPadding 4
               # LocalTimeZone # BackgroundColor infoBackground
               # clockTooltip,
-        logtm cpu # cpuTooltip # OnClick "top.sh" #RefreshRate 0.001,
+        logtm cpu # cpuTooltip # OnClick "top.sh",
         logtm mem # memTooltip,
         logtm (net "eth0"),
         logtm (net "brkvm"),
