@@ -1025,6 +1025,12 @@ makeWidget rs _ wd@BatteryStatus {batteryName = n, refreshRate = rate} = do
       "Discharging" | rate /= 0 -> printf "%d%%(%d:%02d)" percent h m
       _ -> printf "%d%%C" percent
 
+makeWidget rs _ wd@BatteryRate {batteryName = n, refreshRate = rate} = do
+  makeUpdatingTextWidget rs wd rate $ statelessModule $ do
+    power <- readBatteryDouble n "power_now"
+    volts <- readBatteryDouble n "voltage_now"
+    return . (: []) $ printf "Current current: %.2f A" $ power / volts
+
 makeWidget rs _ wd@Trayer {} = do
     let (pos, sz) = (position $ attr_ wd, size $ attr_ wd)
         cmd = trayerCmd (windowHeight rs) $ windowWidth rs - x_ pos - x_ sz
