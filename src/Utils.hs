@@ -1,5 +1,5 @@
 module Utils (
-  join,
+  --join,
   strip,
   fi,
   fmtBytes,
@@ -12,10 +12,6 @@ import Text.Printf
 import qualified Data.Map as M
 import qualified Data.ByteString as Str
 import qualified Data.ByteString.Char8 as Char8
-
-join :: String -> [String] -> String
-join _ [] = ""
-join sep (x:xs) = foldl (\a b ->  a++sep++b ) x xs
 
 strip :: String -> String
 strip = reverse . dropWhile p . reverse . dropWhile p where

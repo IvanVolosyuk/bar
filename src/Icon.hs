@@ -34,7 +34,7 @@ makeIconConfig = IconConfig {
    bgColor = "#BEBEBEFF"
    }
 
-makeIconCache dpy = do 
+makeIconCache dpy = do
   iconProperty <- internAtom dpy "_NET_WM_ICON" False
   return $ IconCache dpy iconProperty M.empty makeIconConfig
 
@@ -88,19 +88,19 @@ loadIconImage c@(IconCache dpy atom cache cfg) win =
 
 getIconImage :: Window -> IconCache -> Maybe CachedIcon
 getIconImage win cache = M.lookup win (getCache cache)
-       
+
 
 chunksOf _ [] = []
 chunksOf n s = x : chunksOf n xs where (x,xs) = splitAt n s
 
-toColor str = map (fst . head . readHex) . chunksOf 2 $ tail str 
+toColor str = map (fst . head . readHex) . chunksOf 2 $ tail str
 
 blend a1 a2 (v1, v2) = fromIntegral $ (a1' * v1' + a2' * v2') `div` 255 where
  [a1', a2', v1', v2'] = map fromIntegral [a1, a2, v1, v2]
 
 
 onTop :: [Word8] -> [Word8] -> [Word8]
-onTop bg color = map (blend (255-a) a) $ zip bg color where
+onTop bg color = zipWith (curry (blend (255-a) a)) bg color where
   a = last color
 
 scaleSimple :: Int -> Int -> [a] -> [a]
@@ -126,19 +126,17 @@ class Math a where
       else let newpos' = newpos + size;
                acc' = ((newpos' - maxpos) `mul` a) `add` acc in
            (acc' : pick pos newpos' newpos' zero (a:ar))
-    
+
 
 instance Math Int where
   mul a x = a * x
   normalize a x = x `div` a
   add x y = x + y
 
-pair op (a,b) = op a b
-
 instance (Math a) => Math [a] where
   mul a = map (mul a)
   normalize a = map (normalize a)
-  add xs ys = map (pair add) $ zip xs ys
+  add = zipWith add
 
 scale1D newsize a = map (normalize size) . scale size newsize $ a where
   size = length a
@@ -148,7 +146,7 @@ scale2D w h newsize = concat . normalize (w * h) . scale h newsize
                    . map (scale w newsize) . chunksOf w
 
 scaleNearest :: Int -> Bitmap [Word8] -> Bitmap [Word8]
-scaleNearest sz (Bitmap w h px ) = Bitmap sz sz . concat 
+scaleNearest sz (Bitmap w h px ) = Bitmap sz sz . concat
      . scaleSimple w sz . map (scaleSimple w sz) . chunksOf w $ px
 
 scaleLinear sz (Bitmap w h px) = Bitmap sz sz
@@ -186,7 +184,7 @@ layer :: Bitmap [Word8] -> Bitmap [Word8] -> Bitmap [Word8]
 layer (Bitmap w h px) (Bitmap w2 h2 px2) = Bitmap (min w w2) (min h h2) newpx where
   grid = chunksOf w px
   grid2 = chunksOf w2 px2
-  newpx = concatMap (map (pair onTop) . pair zip) $ zip grid2 grid
+  newpx = concatMap (map (uncurry onTop) . uncurry zip) $ zip grid2 grid
 
 shadow :: Int -> String -> Bitmap [Word8] -> Bitmap [Word8]
 shadow off c b = layer b2 $ shift off off . colorFilter (setColor c) $ b2 where
