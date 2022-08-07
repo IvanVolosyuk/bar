@@ -712,9 +712,23 @@ diffModule cmp m = Module $ \_ -> do
   v <- m
   runModule (diffModule' v cmp m) ()
 
+{- unused
+runModules :: (Monad m) => [Module m a b] -> a -> m ([b], [Module m a b])
+runModules [] _ = return ([], [])
+runModules (x:xs) a = do
+  (b, x') <- runModule x a
+  (bs, xs') <- runModules xs a
+  return (b:bs, x':xs')
+
+zipModules :: (Monad m) => [Module m a b] -> Module m a [b]
+zipModules ms = Module $ \a -> do
+  (bs, ms') <- runModules ms a
+  return (bs, zipModules ms')
+
 constModule :: (Monad m) => b -> Module m a b
 constModule v  = Module $ \_ -> do
   return (v, constModule v)
+-}
 
 {- Module seem like cannot be Monad as mf not doesn't persist over call
 instance (Monad m) => Monad (Module m a) where
@@ -1093,42 +1107,40 @@ paintWindow rs drawableWidgets repaint = do
 runThread :: IO () -> IO ThreadId
 runThread = forkIO
 
-runModules :: (Monad m) => [Module m a b] -> a -> m ([b], [Module m a b])
-runModules [] _ = return ([], [])
-runModules (x:xs) a = do
-  (b, x') <- runModule x a
-  (bs, xs') <- runModules xs a
-  return (b:bs, x':xs')
-
-zipModules :: (Monad m) => [Module m a b] -> Module m a [b]
-zipModules ms = Module $ \a -> do
-  (bs, ms') <- runModules ms a
-  return (bs, zipModules ms')
 
 updateStep :: IO () -> [(Module IO () (), Period)] -> IO ()
 updateStep onupdated timers = do
     let min_period [] = 3600 -- empty thread doing nothing
         min_period timers = minimum $ map snd timers
-    print $ "Min refresh rate" ++ show (min_period timers)
+    print $ "Min refresh rate: " ++ show (min_period timers)
     updateStep' onupdated 0 (min_period timers) timers
 
-updateStep' :: IO () -> Int -> NominalDiffTime -> [(Module IO () (), Period)] -> IO ()
-updateStep' onupdated tick min_period timers = do
-    (updated, timers') <- unzip <$> mapM (updateOne tick min_period) timers
-    when (or updated) onupdated
+updateStep' :: IO () -> NominalDiffTime -> NominalDiffTime -> [(Module IO () (), Period)] -> IO ()
+updateStep' onupdated tm min_period timers = do
     time <- getCurrentTime >>= \t -> return $ diffUTCTime t epoch :: IO NominalDiffTime
-    let next_tick = tick + 1 :: Int
-    let target_time = min_period * fi next_tick
-    let dt = target_time - time
-    when (dt > 0) $ threadDelay $ round (1000000 * dt)
-    let reset_tick = truncate $ time / min_period :: Int
-    let next_tick' = (if dt < -3000 then fi reset_tick else next_tick) :: Int
-    updateStep' onupdated next_tick' min_period timers'
+    let actual_tm = fi (truncate (time / min_period)) * min_period
 
-updateOne :: Int -> NominalDiffTime -> (Module IO () (), Period) -> IO(Bool, (Module IO () (), Period))
-updateOne tick min_period (mod, period) = do
-    let tm = min_period * fi tick :: NominalDiffTime
-    if tm == fi (round $ tm / period) * period
+    let next_tm = tm + min_period
+    next_tm' <- if actual_tm > next_tm + min_period
+       then do
+          print $ "timer behind schedule by " ++ show (actual_tm - next_tm)
+          return actual_tm
+       else return next_tm
+
+    (updated, timers') <- unzip <$> mapM (updateOne (tm-min_period) (next_tm'-min_period)) timers
+    when (or updated) onupdated
+
+    actual_tm' <- getCurrentTime >>= \t -> return $ diffUTCTime t epoch :: IO NominalDiffTime
+    let dt = next_tm' - actual_tm'
+    when (dt > 0) $ threadDelay $ truncate (1000000 * dt)
+
+    updateStep' onupdated next_tm' min_period timers'
+
+updateOne :: NominalDiffTime -> NominalDiffTime -> (Module IO () (), Period) -> IO(Bool, (Module IO () (), Period))
+updateOne tm next_tm (mod, period) = do
+    let a = truncate (tm / period) :: Int
+    let b = truncate (next_tm / period) :: Int
+    if a /= b
         then execModule mod () >>= \m' -> return (True, (m', period))
         else return (False, (mod, period))
 
