@@ -43,6 +43,8 @@ barHeight = 24
 defaultFont :: String
 defaultFont = "-*-*-medium-r-normal--15-*-*-*-*-*-iso10646-*"
 
+largeFont = "-*-*-medium-r-normal--35-*-*-*-*-*-iso10646-*"
+
 barBackground :: String
 barBackground = "#BEBEBE"
 
@@ -74,6 +76,7 @@ bar1 = Bar barBackground barHeight (XineramaScreen 0) GravityTop [
         logtm (net "eth0"),
         logtm (net "brkvm"),
         logtm (net "wlp2s0"),
+        logtm (net "wlp0s20f3"),
         battery "BAT0",
         battery "BAT1",
         trayer,
@@ -97,34 +100,34 @@ bar2 = Bar barBackground (barHeight*2) (XineramaScreen 0) GravityBottom [
       ]
 
 clockTooltip :: Tooltip
-clockTooltip = Tooltip tooltipBackground (Size 460 (barHeight * 4)) Horizontal [
-        frame Vertical [
-                         tooltipClock #OtherTimeZone "GMT",
-                         tooltipClock #OtherTimeZone "America/Los_Angeles"
-                                       -- 0527 06:17:59.956236
-                                      #TimeFormat "%m%d %H:%M:%S",
-                         tooltipClock #OtherTimeZone "America/Los_Angeles",
-                         tooltipClock
-                       ] #Width 340,
-        frame Vertical [
-           tooltipLabel #Message "GMT: " #JustifyRight,
-           tooltipLabel #Message "MTV TS: " #JustifyRight,
-           tooltipLabel #Message "MTV: " #JustifyRight,
-           tooltipLabel #Message "Local: " #JustifyRight
-                       ]
- ]
+clockTooltip = Tooltip tooltipBackground (Size 460 (barHeight * 5)) Vertical [
+     tooltipClock #TimeFormat "%a, %e %b - %X" #JustifyMiddle
+              # Height (barHeight * 2) # RightPadding 4 # LocalTimeZone
+              #SetFont largeFont #SetTextHeight (2 *barHeight),
+     frame Horizontal [
+          frame Vertical [
+                 tooltipClock #OtherTimeZone "America/Los_Angeles"
+                               -- 0527 06:17:59.956236
+                              #TimeFormat "%Y-%m-%d %H:%M:%S",
+                 tooltipClock #OtherTimeZone "America/Los_Angeles",
+                 tooltipClock #OtherTimeZone "GMT"
+                 ] #Width 340,
+          frame Vertical [
+                 tooltipLabel #Message "MTV TS: " #JustifyRight,
+                 tooltipLabel #Message "MTV: " #JustifyRight,
+                 tooltipLabel #Message "GMT: " #JustifyRight
+                 ]
+          ] #Height (barHeight * 3)
+     ]
 
 cpuTooltip :: Tooltip
-cpuTooltip = Tooltip tooltipBackground (Size 300 (8*barHeight)) Vertical [
-     frame Horizontal [
-       tooltip cpu #RefreshRate 0.01 #LinearTime #Height (2*barHeight)
+cpuTooltip = Tooltip tooltipBackground (Size 600 (8*barHeight)) Horizontal [
+     tooltip cpu #RefreshRate 0.05 #LinearTime #Width 100
                    #BottomPadding 1 #RightPadding 1 # LeftPadding 1
                    #Width 100 #Refresh WhenVisible,
-       tooltip cpu #RefreshRate 1 #LinearTime #Height (2*barHeight)
-                   #BottomPadding 1 #RightPadding 1 # LeftPadding 1
-       ],
-     hseparator,
-     tooltipText cpuTop
+     tooltip cpu #RefreshRate 1 #LinearTime #Width 200
+                   #BottomPadding 1 #RightPadding 1 # LeftPadding 1,
+     tooltipText cpuTop #Width 300
      ]
 
 memTooltip :: Tooltip
@@ -134,9 +137,12 @@ memTooltip = Tooltip tooltipBackground (Size 490 (6*barHeight)) Horizontal [
      ]
 
 netTooltip :: String -> Tooltip
-netTooltip netdev = Tooltip tooltipBackground (Size 480 (2*barHeight)) Horizontal [
-     tooltip (tooltipNet netdev) #RefreshRate 1 #LinearTime # Width 100
-            # TopPadding 1 # BottomPadding 1,
+netTooltip netdev = Tooltip tooltipBackground (Size 480 (10*barHeight)) Vertical [
+     frame Horizontal [
+           tooltip (tooltipNet netdev) #RefreshRate 0.05 #Refresh WhenVisible #LinearTime # Width 200,
+           tooltip (tooltipNet netdev) #RefreshRate 1 #LinearTime # Width 200
+                           # TopPadding 1 # BottomPadding 1
+           ] #Height (8 * barHeight),
      tooltipText (netstatus netdev) #RefreshRate 3 #JustifyLeft #LeftPadding 10
      ]
 
@@ -163,7 +169,7 @@ tooltipText w = tooltip w  #TextColor "#000000"
               #SetFont "-*-courier new-*-r-normal-*-17-*-*-*-*-*-*-*"
 
 tooltipClock :: Widget
-tooltipClock = tooltipText clock #TimeFormat "%a, %e %b %Y - %X"
+tooltipClock = tooltipText clock #TimeFormat "%a, %e %b %Y - %X" #JustifyLeft
 
 tooltipLabel :: Widget
 tooltipLabel = tooltipText label
@@ -175,7 +181,7 @@ tooltipNet netdev = Graph defaultAttr (GraphDef (Net netdev) (LogTime 8) Always)
 data Attribute = Width Int | Height Int | LeftPadding Int | RightPadding Int
                | TopPadding Int | BottomPadding Int
                | TextColor Main.Color | BackgroundColor Main.Color
-               | TimeFormat String | Message String | SetFont String
+               | TimeFormat String | Message String | SetFont String | SetTextHeight Int
                | RefreshRate Period | OnClick String | Refresh RefreshType
 
 type Color = String
@@ -303,6 +309,7 @@ withPadding ww f = withAttr ww $ \wa -> wa { padding = f (padding wa) }
 instance Apply Attribute where
   apply (TextColor c) ww = let TextAttributes _ j f hs = tattr_ ww in ww { tattr_ = TextAttributes c j f hs}
   apply (SetFont f) ww = let TextAttributes c j _ hs = tattr_ ww in ww { tattr_ = TextAttributes c j f hs}
+  apply (SetTextHeight hs) ww = let TextAttributes c j f _ = tattr_ ww in ww { tattr_ = TextAttributes c j f hs}
 
   apply (Width w) ww = withAttr ww $ \wa -> wa { size = Size w (y_ . size $ wa)}
   apply (Height h) ww = withAttr ww $ \wa -> wa { size = Size (x_ . size $ wa) h}
