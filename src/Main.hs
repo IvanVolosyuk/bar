@@ -1,12 +1,12 @@
-{-# LANGUAGE Arrows, DeriveGeneric, DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric, DeriveAnyClass #-}
 
-import Control.Arrow
-import qualified Control.Category as Cat
 import Control.Applicative
+import Control.Arrow
 import Control.Concurrent
 import Control.DeepSeq
 import Control.Exception
 import Control.Monad
+import Control.Monad.Loops
 import Data.Bits
 import Data.IORef
 import Data.List
@@ -24,10 +24,13 @@ import Graphics.X11.Xlib.Extras
 import Graphics.X11.Xrender
 import Numeric
 import System.Exit
-import System.Posix.Process
 import System.IO.Error
+import System.Posix.Process
 import System.Process (runCommand, terminateProcess)
 import Text.Printf
+import qualified Control.Category as Cat
+import qualified GHC.Exts.Heap as Heap
+import qualified GHC.Exts.Heap.Closures as Closures
 
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
@@ -358,7 +361,7 @@ formatClock fmt zoned = do
   zonedTime <- zoned time
   return $ formatTime Data.Time.defaultTimeLocale fmt zonedTime
 
-type ControlChan = Chan ()
+data SenderX = SenderX Display Window Atom
 
 data RenderState = RenderState {
   display :: Display,
@@ -369,7 +372,7 @@ data RenderState = RenderState {
   windowHeight :: Int,
   windowBackground :: String,
   pos :: (Int, Int, Int, Int, Int, Int),
-  control :: ControlChan
+  refresh_ :: Window
 }
 
 instance Eq RenderState where
@@ -432,26 +435,28 @@ drawMessages rs attr tattr font d (icons, yoff) msg = do
   (icons', _) <- foldM (drawMessage rs attr tattr font d) (icons, Size 0 yoff) (parseLine msg)
   return (icons', yoff + ths)
 
+
+-- Should be data for strictness
 type GraphSample = [Int]
-data GraphData = LinearGraph ![GraphSample] | LogGraph Int ![[GraphSample]] deriving (Show, Generic, NFData)
+data GraphData = LinearGraph [GraphSample] | LogGraph Int [[GraphSample]] deriving (Show, Generic, NFData)
 
 makeGraph :: TimeScale -> Int -> Int -> GraphData
-makeGraph LinearTime ws l = LinearGraph $! replicate ws $ replicate l 0
-makeGraph (LogTime n) ws _ = LogGraph n $! replicate (1 + ws `div` n) []
+makeGraph LinearTime ws l = LinearGraph $ replicate ws $ replicate l 0
+makeGraph (LogTime n) ws _ = LogGraph n $ replicate (1 + ws `div` n) []
 
 avgSamp :: [GraphSample] -> GraphSample -- (a + b + 1) /2
-avgSamp ar = ar `deepseq` map (\v -> (sum v + 1) `div` length v) $ transpose ar
+avgSamp ar = map (\v -> (sum v + 1) `div` length v) $ transpose ar
 
 updateGraph :: Int -> GraphData -> GraphSample -> GraphData
-updateGraph ws (LinearGraph g) s = g `deepseq` LinearGraph $! s : take ws g
-updateGraph _ (LogGraph n g) s = g `deepseq` LogGraph n $ updateLayer g s where
+updateGraph ws (LinearGraph g) s = LinearGraph $ s : take ws g
+updateGraph _ (LogGraph n g) s = LogGraph n $ updateLayer g s where
   updateLayer :: [[GraphSample]] -> GraphSample -> [[GraphSample]]
   updateLayer [] _ = []
   updateLayer (vv:xs) v
     | length vv == (n+2) = let (a,b) = splitAt n vv in (v:a):updateLayer xs (avgSamp b)
     | otherwise = (v:vv):xs
 
-exportGraph :: GraphData -> [[Int]]
+exportGraph :: GraphData -> [GraphSample]
 exportGraph (LinearGraph g) = g
 exportGraph (LogGraph n g) = concatMap (take' n) g where
   take' n' ar = let (a,b) = splitAt (n'-1) ar in a ++ (case b of
@@ -461,7 +466,7 @@ exportGraph (LogGraph n g) = concatMap (take' n) g where
 readBatteryFile :: FilePath -> IO (M.Map String String)
 readBatteryFile = readKeyValueFile $ head . words
 
-readNetFile :: FilePath -> IO (M.Map String [Integer])
+readNetFile :: FilePath -> IO (M.Map String [Int])
 readNetFile = readKeyValueFile $ map read . words
 
 readFileWithFallback :: String -> IO String
@@ -481,7 +486,7 @@ readBatteryDouble n x = read <$> readBatteryString n x :: IO Double
 getDt :: Fractional t => UTCTime -> UTCTime -> t
 getDt newTs ts = (/1e12) . fromIntegral . fromEnum $ diffUTCTime newTs ts
 
-getNetBytes :: (Num t, Integral a) => [a] -> [t]
+getNetBytes :: [Int] -> GraphSample
 getNetBytes input = [inbound, outbound] where
   atIndex idx = fi $ input !! idx
   inbound = atIndex 0
@@ -551,16 +556,17 @@ sendClientEvent d a w val = do
          sendEvent d w False structureNotifyMask e
     sync d False
 
-copyChanToX :: ControlChan -> Window -> IO ()
-copyChanToX chan w = do
-  ch <- dupChan chan
+makeSenderX w = do
   d <- openDisplay ""
   a <- internAtom d "BAR_UPDATE" False
-  forever $ do
-     _ <- readChan ch
-     sendClientEvent d a w 0 `catchIOError`  \x -> do
+  return $ SenderX d w a
+
+sendX :: SenderX -> IO ()
+sendX (SenderX dpy w a) = do
+
+  sendClientEvent dpy a w 0 `catchIOError`  \x -> do
        print $ "Exception caught: " ++ show x
-       sync d False
+       sync dpy False
 
 
 checkBattery wd n = do
@@ -581,8 +587,8 @@ removeBroken wd@NetStatus {netdev_ = n} = checkNetdev wd n
 removeBroken wd = return $ Just wd
 
 
-makeBar :: Display -> ControlChan -> Bar -> IO WindowState
-makeBar dpy controlCh (Bar bg height screen gravity wds) = do
+makeBar :: Display -> Bar -> IO WindowState
+makeBar dpy (Bar bg height screen gravity wds) = do
 
   let scr = defaultScreen dpy
   xiscr <- case screen of
@@ -613,12 +619,13 @@ makeBar dpy controlCh (Bar bg height screen gravity wds) = do
                     0 copyFromParent inputOutput (defaultVisual dpy scr) 0 nullPtr
   gc <- createGC dpy w
   buf <- createPixmap dpy w (fi scWidth) (fi height) (defaultDepth dpy scr)
+  refresh <- makeSenderX w
 
   let rs = RenderState { display = dpy, window = w, buffer = buf, gc_ = gc,
                          windowWidth = fi scWidth, windowHeight = height,
                          windowBackground = bg,
                          pos = (fi scX, fi y, fi scX, fi scY, fi scWidth, fi scHeight),
-                         control = controlCh }
+                         refresh_ = w }
 
   strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
   changeProperty32 dpy w strutPartial cARDINAL propModeReplace strutValues
@@ -649,13 +656,15 @@ drops Mem = 0
 drops _ = 1
 
 scaleG hs (total:vals) = map ((`div` (if total == 0 then 1 else total)) . (*hs)) vals
+
+readCPU :: IO GraphSample
 readCPU = map read . tail. words . head . lines <$> readFully "/proc/stat"
 
-readNet :: String -> IO ([Int], UTCTime)
+readNet :: String -> IO (GraphSample, UTCTime)
 readNet netdev = do
   ts <- getCurrentTime
   net <- readNetFile "/proc/net/dev"
-  let inout = ($!) getNetBytes (net ! netdev)
+  let inout = getNetBytes (net ! netdev)
   return (inout, ts)
 
 
@@ -672,9 +681,13 @@ revf3 x = exp (x ** (1/3)) - 1 + 0.5
 --runModule :: (Monad m) => Module m a b -> a -> m (b, Module m a b)
 --runModule (Module m) = m
 
-newtype Module m a b = Module { runModule :: a -> m (b, Module m a b) }
+newtype Module m a b = Module { runModuleI :: a -> m (b, Module m a b) } deriving (Generic, NFData)
 
-execModule :: (Monad m) => Module m a b -> a -> m (Module m a b)
+runModule m a = do
+  (b, m') <- runModuleI m a
+  return (b, m')
+
+execModule :: (Monad m, NFData a, NFData b) => Module m a b -> a -> m (Module m a b)
 execModule m inp = snd <$> runModule m inp
 
 instance (Monad m) => Functor (Module m a) where
@@ -688,51 +701,62 @@ instance (Monad m) => Applicative (Module m a) where
   Module f1 <*> Module f2 = Module $ \inp -> do
     (f, m1') <- f1 inp
     (x, m2') <- f2 inp
-    return (f x, m1' <*> m2')
+    let v = f x
+    return (v, m1' <*> m2')
 
 instance (Monad m) => Cat.Category (Module m) where
    id = Module $ \a -> return (a, Cat.id)
    (.) m2 m1 = Module $ \a -> do
-        (b, m1') <- runModule m1 a
-        (c, m2') <- runModule m2 b 
+        (b, m1') <- runModuleI m1 a
+        (c, m2') <- runModuleI m2 b
         return (c, m2' Cat.. m1')
 
 instance (Monad m) => Arrow (Module m) where
   -- not monadic version
-  arr f = Module $ \a -> return (f a, arr f)
+  arr f = Module $ \a -> let v = f a in return (v, arr f)
   first m = Module $ \(a,b) -> do
-       (a', m') <- runModule m a
+       (a', m') <- runModuleI m a
        return ((a', b), first m')
 
 pipeModules :: (Monad m) => Module m b c -> Module m a b -> Module m a c
 pipeModules m2 m1 = m2 Cat.. m1
 
+{-
+pipeModules :: (Monad m, NFData a, NFData c) => Module m b c -> Module m a b -> Module m a c
+pipeModules m2 m1 = Module $ \a -> do
+        (b, m1') <- runModuleI m1 a
+        (c, m2') <- runModuleI m2 b
+        return (c, m2' `pipeModules` m1')
+-}
+
 mkConst :: (Monad m) => b -> Module m a b
 mkConst v = Module $ \_ -> return (v, mkConst v)
 
-mkConstM :: (Monad m) => m b -> Module m a b
+mkConstM :: (Monad m, NFData b) => m b -> Module m a b
 mkConstM mv = Module $ \_ -> mv >>= \x -> return (x, mkConstM mv)
 
-mkFunc :: (Monad m) => (a -> b) -> Module m a b
-mkFunc = arr
+mkFunc :: (Monad m, NFData a, NFData b) => (a -> b) -> Module m a b
+--mkFunc v = v `deepseq` arr v
+mkFunc f = Module $ \a -> let v = f a in return (v, mkFunc f)
 
-mkFuncM :: (Monad m) => (a -> m b) -> Module m a b
+
+mkFuncM :: (Monad m, NFData b) => (a -> m b) -> Module m a b
 mkFuncM f = Module $ \a -> do
   v <- f a
   return (v, mkFuncM f)
 
-accum :: (Monad m) => acc -> (acc -> a -> (b, acc)) -> Module m a b
+accum :: (Monad m, NFData acc, NFData b) => acc -> (acc -> a -> (b, acc)) -> Module m a b
 accum acc f = Module $ \input -> do
     let (output, acc') = f acc input
     return (output, accum acc' f)
 
-delayedEcho :: (Monad m) => a -> Module m a a
+delayedEcho :: (Monad m, NFData a) => a -> Module m a a
 delayedEcho acc = accum acc (,)
 
-delayedEcho' :: (Monad m) => Module m a a
+delayedEcho' :: (Monad m, NFData a) => Module m a a
 delayedEcho' = Module $ \x -> return (x, delayedEcho x)
 
-statelessModule :: (Monad m) => m b -> Module m a b
+statelessModule :: (Monad m, NFData b) => m b -> Module m a b
 statelessModule = mkConstM
 
 
@@ -766,37 +790,70 @@ debugCounter v = Module $ \_ -> do
   print $ "counter: " ++ show v
   return ((), debugCounter (v+1))
 
+{-
 dummy typ = proc _ -> do
   t <- sampleTask typ -< ()
   returnA -< t
+-}
 
-sampleTask :: GraphType -> Module IO () [Int]
+sampleTask :: GraphType -> Module IO () GraphSample
+sampleTask Cpu = sampleTaskCpu [0,0,0,0,0]
+  where
+  sampleTaskCpu prev_cpu = Module $ \_ -> do
+    cpu <- readCPU
+    let output = let (user:nice:sys:idle:io:_) = zipWith (-) cpu prev_cpu
+                 in [sys + io, nice, user, idle]
+    return (output, sampleTaskCpu cpu)
+
+{- cannot figure out memory leaks with proc
 sampleTask Cpu = proc _ -> do
   cpu <- mkConstM readCPU -< ()
   prev_cpu <- delayedEcho' -< cpu
   returnA -< let (user:nice:sys:idle:io:_) = zipWith (-) cpu prev_cpu
-             in [sys + io, nice, user, idle]
-
+             in GraphSample [sys + io, nice, user, idle]
+-}
 
 sampleTask Mem = mkConstM $ do
     mem <- readBatteryFile "/proc/meminfo"
-    let [total,free,cached] = ($!) map (read . (mem !))
+    let [total,free,cached] = map (read . (mem !))
            ["MemTotal", "MemFree", "Cached"]
         out = [total - free - cached, cached, free]
-    out `deepseq` return out
+    return out
 
 sampleTask (Battery n) = mkConstM $ do
     capacity <- readBatteryInt n "energy_full"
     remainingCapacity <- readBatteryInt n "energy_now"
     let out = [remainingCapacity, capacity - remainingCapacity]
-    out `deepseq` return out
+    return out
 
 
+sampleTask (Net netdev) = sampleTaskNetFirst
+  where
+    sampleTaskNet (old_time, old_net) = Module $ \_ -> do
+       time <- getCurrentTime
+       nets <- readNetFile "/proc/net/dev"
+       let net = getNetBytes (nets ! netdev)  :: GraphSample
+           f x = log (x + 1)
+           f3 x = f x * f x * f x
+           dt = getDt time old_time :: Double
+           [inbound, outbound] = map (f3 . fromIntegral) $ zipWith (-) net old_net :: [Double]
+           maxspeed = f3 $ dt * 100000000 :: Double
+           output = map (truncate . max 0)
+                [inbound, maxspeed - inbound - outbound, outbound, 0] :: [Int]
+       return (output, sampleTaskNet (time, net))
+    sampleTaskNetFirst = Module $ \_ -> do
+       time <- getCurrentTime
+       nets <- readNetFile "/proc/net/dev"
+       let net = getNetBytes (nets ! netdev)  :: GraphSample
+       runModule (sampleTaskNet (time, net)) ()
+
+
+{- cannot figure out memory leaks with proc
 sampleTask (Net netdev) = proc _ -> do
-  --debugCounter 10 -< ()
+  debugCounter 10 -< ()
   time <- mkConstM getCurrentTime -< ()
   nets <- mkConstM (readNetFile "/proc/net/dev") -< ()
-  let net = ($!) getNetBytes (nets ! netdev) 
+  let net = ($!) getNetBytes (nets ! netdev)  :: [Int]
   (old_time, old_net) <- delayedEcho' -< (time, net)
   let f x = log (x + 1)
       f3 x = f x * f x * f x
@@ -805,10 +862,12 @@ sampleTask (Net netdev) = proc _ -> do
       maxspeed = f3 $ dt * 100000000 :: Double
       output = ($!) map (truncate . max 0)
           [inbound, maxspeed - inbound - outbound, outbound, 0] :: [Int]
-  returnA -< output
+  returnA -< force output
+-}
 
+data Rect = Rect Int Int Int Int deriving (Generic, NFData)
 
-mergeRect (Rectangle x0 y0 w0 h0) (Rectangle x1 y1 w1 h1) = Rectangle x y (fi w) (fi h)
+mergeRect (Rect x0 y0 w0 h0) (Rect x1 y1 w1 h1) = Rect x y (fi w) (fi h)
   where
   calc a0 a1 b0 b1 = let (mn, mx) = (min a0 a1, max b0 b1) in (mn, mx - mn)
   (x, w) = calc x0 x1 (x0+fi w0) (x1+fi w1)
@@ -855,13 +914,13 @@ createTooltip parent_rs pwd tip = do
 
   windowMapAndSelectInput dpy w (structureNotifyMask .|. exposureMask)
 
-  let rs = RenderState dpy w buf gc width height bg (x, y_ place, scX, scY, scWidth, scHeight) (control parent_rs)
+  let rs = RenderState dpy w buf gc width height bg (x, y_ place, scX, scY, scWidth, scHeight) (window parent_rs)
   return (rs, widgets)
 
 getBounds wd =
   let WidgetAttributes sz pos  _ _ _ _ = attr_ wd
   -- FIXME: use Word32 for dimensions?
-  in Rectangle (fi $ x_ pos) (fi $ y_ pos) (fi $ x_ sz) (fi $ y_ sz)
+  in Rect (x_ pos) (y_ pos) (x_ sz) (y_ sz)
 
 -- Always updating graphs
 type BgGraphInfo = (GraphDef, Int, NominalDiffTime)
@@ -869,6 +928,8 @@ extractGlobalGraphInfo :: Widget -> Maybe BgGraphInfo
 extractGlobalGraphInfo (Graph attr graph@GraphDef { refresh_type_ = Always} _ refresh) = Just (graph, x_ $ size attr, refresh)
 extractGlobalGraphInfo NetStatus {refreshRate = r, netdev_ = n} = Just (GraphDef (Net n) LinearTime Always, 20, r)
 extractGlobalGraphInfo _ = Nothing
+
+writeIORef' ref v = atomicModifyIORef' ref (const (v, ()))
 
 makeBackgroundGraph (GraphDef typ tscale _, ws, rate) = do
   let graphdata = makeGraph tscale ws (layers typ)
@@ -879,14 +940,13 @@ makeBackgroundGraph (GraphDef typ tscale _, ws, rate) = do
     updater ref sampler' graphdata' = Module $ \_  -> do
         (sample, sampler'') <- runModule sampler' ()
         let graphdata'' = updateGraph ws graphdata' sample
-        writeIORef ref graphdata''
+        graphdata'' `deepseq` writeIORef' ref graphdata''
         return ((), updater ref sampler'' graphdata'')
 
 type BgGraphs = [(BgGraphInfo, IORef GraphData)]
 
 makeBackgroundGraphs :: [WindowState] -> IO BgGraphs
 makeBackgroundGraphs wins = do
-
   let leafWidgets Frame{ children = c} = concatMap leafWidgets c
       leafWidgets w = [w]
       tooltipWidgets (Tooltip bg tsz orien widgets) = widgets
@@ -901,12 +961,12 @@ makeBackgroundGraphs wins = do
   return $ zip graphInfos refs
 
 
-data Repaint = RepaintAll | RepaintUpdated
-type PaintWidgetCallback = Module IO Repaint (Maybe Rectangle)
+data Repaint = RepaintAll | RepaintUpdated deriving (Generic, NFData)
+type PaintWidgetCallback = Module IO Repaint (Maybe Rect)
 type PaintWindowModule = Module IO Repaint ()
 type TooltipInfo = (RenderState, Widget)
 
-type DrawCallback = IO (Maybe Rectangle)
+type DrawCallback = IO (Maybe Rect)
 type UpdaterTickModule a =  Module IO () a
 type UpdaterDef = (UpdaterTickModule (), Period)
 type DynamicWidgetDef = (PaintWidgetCallback, Maybe UpdaterDef)
@@ -921,14 +981,14 @@ drawStrings rs wd fn icons strings d = do
 
 makeIcons rs@RenderState { display = dpy} = makeIconCache dpy
 
-makeUpdatingPainterWithArg :: IORef (a -> IO (a, Maybe Rectangle))
+makeUpdatingPainterWithArg :: IORef (a -> IO (a, Maybe Rect))
                             -> IORef Bool
                             ->  a
-                            ->  Module IO Repaint (Maybe Rectangle)
+                            ->  Module IO Repaint (Maybe Rect)
 makeUpdatingPainterWithArg paint dirty arg = Module $ \repaint -> perform arg repaint
     where
        perform arg RepaintAll = do
-          writeIORef dirty False
+          writeIORef' dirty False
           painter <- readIORef paint
           (arg',rect) <- painter arg
           return (rect, makeUpdatingPainterWithArg paint dirty arg')
@@ -944,11 +1004,11 @@ makeUpdatingWidget rate updater = do
   paint <- newIORef $ \_ -> return ( (), Nothing)
   dirty <- newIORef False
   let updateWrap = mkFuncM $ \drawable -> do
-          writeIORef paint $ \_ -> do 
+          writeIORef' paint $ \_ -> do
              mbrect <- drawable
              return ((), mbrect)
-          writeIORef dirty True
-  return (makeUpdatingPainterWithArg paint dirty (), Just (updateWrap Cat.. updater, rate))
+          writeIORef' dirty True
+  return (makeUpdatingPainterWithArg paint dirty (), Just (updateWrap `pipeModules` updater, rate))
 
 makeUpdatingTextWidget :: RenderState -> Widget
                        -> NominalDiffTime
@@ -979,13 +1039,14 @@ makeWidget rs _ wd@Clock { refreshRate = rate } = do
        OtherTimeZone z -> otherTimezone z
   makeUpdatingTextWidget rs wd rate $ mkConstM $ do
           message <- formatClock (fmt_ wd) tz
-          print message
+          -- print message
           return [message]
 
 makeWidget rs _ wd@Title {} = do
-  let RenderState { display = dpy, window = w, control = ch } = rs
+  let RenderState { display = dpy, window = w} = rs
   let terminate msg = do
         print msg
+        --exitSuccess
         exitImmediately ExitSuccess
         return "a"
 
@@ -993,17 +1054,18 @@ makeWidget rs _ wd@Title {} = do
   icons <- makeIcons rs
   paint <- newIORef $ \_ -> return (icons, Nothing)
   dirty <- newIORef False
+  sender <- makeSenderX w
   runThread $ forever $ do
      -- doesn't work with multiple titles on multiple bars
      title <- getLine `catchIOError` terminate
-     writeIORef paint $ \iconsA -> do
+     writeIORef' paint $ \iconsA -> do
          if title == ""
             then unmapWindow dpy w
             else mapWindow dpy w
          withDraw rs (drawStrings rs wd fn iconsA [title])
 
-     writeIORef dirty True
-     writeChan ch ()
+     writeIORef' dirty True
+     sendX sender
   return (makeUpdatingPainterWithArg paint dirty icons, Nothing)
 
 makeWidget rs bgGraphs wd@(Graph attr (GraphDef typ tscale refresh_type) colors rate) = do
@@ -1137,7 +1199,7 @@ mouseHitWins wins (w, Just pos) =
    in find matchWin wins >>= matchWds
 
 maybeCopyArea rs Nothing = return ()
-maybeCopyArea rs (Just (Rectangle x y width height)) = do
+maybeCopyArea rs (Just (Rect x y width height)) = do
    let RenderState {display = dpy, buffer = buf, window = w, gc_ = gc} = rs
    copyArea dpy buf w gc (fi x) (fi y) (fi width) (fi height) (fi x) (fi y)
    sync dpy False
@@ -1156,7 +1218,7 @@ paintWindow rs drawableWidgets = Module $ \repaint -> do
         paintBackground rs RepaintAll = do
           let RenderState dpy ww b gc w h bg _ _ = rs
           withDraw rs $ \d -> drawRect dpy d bg 0 0 w h
-          return $ Just $ Rectangle 0 0 (fi w) (fi h)
+          return $ Just $ Rect 0 0 (fi w) (fi h)
 
         combinedRects [] = Nothing
         combinedRects (x:xs) = Just $ foldr mergeRect x xs
@@ -1164,34 +1226,61 @@ paintWindow rs drawableWidgets = Module $ \repaint -> do
 runThread :: IO () -> IO ThreadId
 runThread = forkIO
 
+allRec :: M.Map String Int -> a -> IO (M.Map String Int)
+allRec m v = do
+  c <- Heap.getClosureData v
+  let i = show c
+  let l = M.lookup i m
+  handle m i c l
+    where
+       handle m i c (Just _) = return m
+       handle m i c Nothing = do
+             let m' = M.insert i 1 m
+             let cc = Closures.allClosures c
+             if null cc
+                then
+                  return m'
+                else do
+                    -- print $ show $ Closures.info c
+                    foldM allRec m' cc
+
+examine :: String -> a -> IO ()
+examine label a = do
+   let m = M.empty
+   m' <- allRec m a
+   print $ label ++ ", size " ++ show (M.size m')
+   return ()
 
 updateStep :: IO () -> [(Module IO () (), Period)] -> IO ()
 updateStep onupdated timers = do
     let min_period [] = 3600 -- empty thread doing nothing
         min_period timers = minimum $ map snd timers
     print $ "Min refresh rate: " ++ show (min_period timers)
-    updateStep' onupdated 0 (min_period timers) timers
+    iterateM_ (updateStep' onupdated (min_period timers)) (0, timers)
 
-updateStep' :: IO () -> NominalDiffTime -> NominalDiffTime -> [(Module IO () (), Period)] -> IO ()
-updateStep' onupdated tm min_period timers = do
-    time <- getCurrentTime >>= \t -> return $ diffUTCTime t epoch :: IO NominalDiffTime
-    let actual_tm = fi (truncate (time / min_period)) * min_period
+--updateStep' :: IO () -> NominalDiffTime -> NominalDiffTime -> [(Module IO () (), Period)] -> IO ()
+updateStep' onupdatedIn min_periodIn (tmIn, timersIn) = do
+  side_effects onupdatedIn min_periodIn tmIn timersIn
+    where
+       side_effects onupdated min_period tm timers = do
+           time <- getCurrentTime >>= \t -> return $ diffUTCTime t epoch :: IO NominalDiffTime
+           let actual_tm = fi (truncate (time / min_period)) * min_period
 
-    let next_tm = tm + min_period
-    next_tm' <- if actual_tm > next_tm + min_period
-       then do
-          print $ "timer behind schedule by " ++ show (actual_tm - next_tm)
-          return actual_tm
-       else return next_tm
+           let next_tm = tm + min_period
+           next_tm' <- if actual_tm > next_tm + min_period
+              then do
+                 print $ "timer behind schedule by " ++ show (actual_tm - next_tm)
+                 return actual_tm
+              else return next_tm
 
-    (updated, timers') <- unzip <$> mapM (updateOne (tm-min_period) (next_tm'-min_period)) timers
-    when (or updated) onupdated
+           (updated, timers') <- unzip <$> mapM (updateOne (tm-min_period) (next_tm'-min_period)) timers
+           when (or updated) onupdated
 
-    actual_tm' <- getCurrentTime >>= \t -> return $ diffUTCTime t epoch :: IO NominalDiffTime
-    let dt = next_tm' - actual_tm'
-    when (dt > 0) $ threadDelay $ truncate (1000000 * dt)
+           actual_tm' <- getCurrentTime >>= \t -> return $ diffUTCTime t epoch :: IO NominalDiffTime
+           let dt = next_tm' - actual_tm'
+           when (dt > 0) $ threadDelay $ truncate (1000000 * dt)
 
-    updateStep' onupdated next_tm' min_period timers'
+           return (next_tm', timers')
 
 updateOne :: NominalDiffTime -> NominalDiffTime -> (Module IO () (), Period) -> IO(Bool, (Module IO () (), Period))
 updateOne tm next_tm (mod, period) = do
@@ -1201,19 +1290,20 @@ updateOne tm next_tm (mod, period) = do
         then execModule mod () >>= \m' -> return (True, (m', period))
         else return (False, (mod, period))
 
-initWidgets :: Display -> ControlChan -> BgGraphs -> WindowState -> IO (PaintWindowModule, ThreadId)
-initWidgets dpy ch bgGraphs (rs, widgets) = do
+initWidgets :: Display -> Window -> BgGraphs -> WindowState -> IO (PaintWindowModule, ThreadId)
+initWidgets dpy parent_w bgGraphs (rs, widgets) = do
   res <- mapM (makeWidget rs bgGraphs) widgets
   let (drawables, mbTimers) = unzip res
   let timers = catMaybes mbTimers :: [ UpdaterDef ]
+  sender <- makeSenderX  parent_w
   -- global timers thread
-  tid <- runThread $ updateStep (writeChan ch ()) timers
+  tid <- runThread $ updateStep (sendX sender) timers
   return (paintWindow rs drawables, tid)
 
 
-eventLoop :: Display -> BgGraphs -> [PaintWindowModule] -> [WindowState]
+eventLoop :: Display -> Window -> BgGraphs -> [PaintWindowModule] -> [WindowState]
                      -> Maybe TooltipInfo -> Maybe (Window, ThreadId) -> IO ()
-eventLoop dpy bgGraphs painters wins tooltipInfo tooltipState = do
+eventLoop dpy parent_w bgGraphs painters wins tooltipInfo tooltipState = do
   (tooltipInfo', painters') <- ($!) allocaXEvent $ \ev -> do
 
     nextEvent dpy ev
@@ -1247,7 +1337,7 @@ eventLoop dpy bgGraphs painters wins tooltipInfo tooltipState = do
 
        _ -> return (tooltipInfo, painters)
   if tooltipInfo' == tooltipInfo
-  then eventLoop dpy bgGraphs painters' wins tooltipInfo tooltipState
+  then eventLoop dpy parent_w bgGraphs painters' wins tooltipInfo tooltipState
   else do
     -- captures painters'
     let destroy Nothing = return painters'
@@ -1261,13 +1351,13 @@ eventLoop dpy bgGraphs painters wins tooltipInfo tooltipState = do
     let create Nothing paintersA = return (paintersA, Nothing)
         create (Just tooltip) paintersA = do
             let (rs, widget) = fromJust tooltipInfo'
-            let RenderState {display = dpy, control = ch}  = rs
+            let RenderState {display = dpy}  = rs
             t <- createTooltip rs widget tooltip
-            (painter, tid) <- initWidgets dpy ch bgGraphs t
+            (painter, tid) <- initWidgets dpy parent_w bgGraphs t
             return (painter:paintersA, Just (window . fst $ t, tid))
 
     (painters'', tooltipState') <- destroy tooltipState >>= create tooltip
-    eventLoop dpy bgGraphs painters'' wins tooltipInfo' tooltipState'
+    eventLoop dpy parent_w bgGraphs painters'' wins tooltipInfo' tooltipState'
 
 
 main :: IO ()
@@ -1276,12 +1366,13 @@ main = do
   dpy <- openDisplay ""
   controlCh <- newChan
 
-  wins <- mapM (makeBar dpy controlCh) bars
+  wins <- mapM (makeBar dpy) bars
 
   let firstRs = fst $ head wins
-  forkOS $ copyChanToX controlCh $ window firstRs
+  let parent_w = window firstRs
+  -- forkOS $ copyChanToX controlCh $ window firstRs
 
-  painters <- map fst <$> mapM (initWidgets dpy controlCh []) wins
+  painters <- map fst <$> mapM (initWidgets dpy parent_w []) wins
   bgGraphs <- makeBackgroundGraphs wins
 
-  eventLoop dpy bgGraphs painters wins Nothing Nothing
+  eventLoop dpy parent_w bgGraphs painters wins Nothing Nothing
