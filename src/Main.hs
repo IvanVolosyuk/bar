@@ -739,48 +739,52 @@ mkFuncM f = Module $ \a -> do
   return (v, mkFuncM f)
 
 
-sampleTask :: GraphType -> Module IO () GraphSample
-sampleTask Cpu = sampleTaskCpu [0,0,0,0,0]
-  where
-  sampleTaskCpu prev_cpu = Module $ \_ -> do
-    cpu <- readCPU
-    let output = let (user:nice:sys:idle:io:_) = zipWith (-) cpu prev_cpu
-                 in [sys + io, nice, user, idle]
-    return (output, sampleTaskCpu cpu)
+data Sampler = SampleCpu GraphSample | SampleMem
+              | SampleNet String UTCTime GraphSample
+              | SampleBattery String
 
-sampleTask Mem = mkConstM $ do
-    mem <- readBatteryFile "/proc/meminfo"
-    let [total,free,cached] = map (read . (mem !))
-           ["MemTotal", "MemFree", "Cached"]
-        out = [total - free - cached, cached, free]
-    return out
+makeSampler Cpu = return $ SampleCpu [0,0,0,0,0]
+makeSampler Mem = return SampleMem
+makeSampler (Battery n) = return $ SampleBattery n
 
-sampleTask (Battery n) = mkConstM $ do
+makeSampler (Net netdev) = do
+  time <- getCurrentTime
+  nets <- readNetFile "/proc/net/dev"
+  let net = getNetBytes (nets ! netdev)  :: GraphSample
+  return $ SampleNet netdev time net
+
+
+readSample (SampleCpu prev_cpu) = do
+  cpu <- readCPU
+  let output = let (user:nice:sys:idle:io:_) = zipWith (-) cpu prev_cpu
+               in [sys + io, nice, user, idle]
+  return (output, SampleCpu cpu)
+
+readSample SampleMem = do
+  mem <- readBatteryFile "/proc/meminfo"
+  let [total,free,cached] = map (read . (mem !))
+         ["MemTotal", "MemFree", "Cached"]
+      out = [total - free - cached, cached, free]
+  return (out, SampleMem)
+
+readSample s@(SampleBattery n) = do
     capacity <- readBatteryInt n "energy_full"
     remainingCapacity <- readBatteryInt n "energy_now"
     let out = [remainingCapacity, capacity - remainingCapacity]
-    return out
+    return (out, s)
 
-
-sampleTask (Net netdev) = sampleTaskNetFirst
-  where
-    sampleTaskNet (old_time, old_net) = Module $ \_ -> do
-       time <- getCurrentTime
-       nets <- readNetFile "/proc/net/dev"
-       let net = getNetBytes (nets ! netdev)  :: GraphSample
-           f x = log (x + 1)
-           f3 x = f x * f x * f x
-           dt = getDt time old_time :: Double
-           [inbound, outbound] = map (f3 . fromIntegral) $ zipWith (-) net old_net :: [Double]
-           maxspeed = f3 $ dt * 100000000 :: Double
-           output = map (truncate . max 0)
-                [inbound, maxspeed - inbound - outbound, outbound, 0] :: [Int]
-       return (output, sampleTaskNet (time, net))
-    sampleTaskNetFirst = Module $ \_ -> do
-       time <- getCurrentTime
-       nets <- readNetFile "/proc/net/dev"
-       let net = getNetBytes (nets ! netdev)  :: GraphSample
-       runModule (sampleTaskNet (time, net)) ()
+readSample (SampleNet netdev old_time old_net) = do
+  time <- getCurrentTime
+  nets <- readNetFile "/proc/net/dev"
+  let net = getNetBytes (nets ! netdev)  :: GraphSample
+      f x = log (x + 1)
+      f3 x = f x * f x * f x
+      dt = getDt time old_time :: Double
+      [inbound, outbound] = map (f3 . fromIntegral) $ zipWith (-) net old_net :: [Double]
+      maxspeed = f3 $ dt * 100000000 :: Double
+      output = map (truncate . max 0)
+           [inbound, maxspeed - inbound - outbound, outbound, 0] :: [Int]
+  return (output, SampleNet netdev time net)
 
 
 data Rect = Rect Int Int Int Int deriving (Generic, NFData)
@@ -852,11 +856,11 @@ writeIORef' ref v = atomicModifyIORef' ref (const (v, ()))
 makeBackgroundGraph (GraphDef typ tscale _, ws, rate) = do
   let graphdata = makeGraph tscale ws (layers typ)
   ref <- newIORef graphdata
-  let sampler = sampleTask typ
+  sampler <- makeSampler typ
   return (updater ref sampler graphdata, rate, ref)
   where
     updater ref sampler' graphdata' = Module $ \_  -> do
-        (sample, sampler'') <- runModule sampler' ()
+        (sample, sampler'') <- readSample sampler'
         let graphdata'' = updateGraph ws graphdata' sample
         graphdata'' `deepseq` writeIORef' ref graphdata''
         return ((), updater ref sampler'' graphdata'')
@@ -887,7 +891,6 @@ type DrawCallback = IO (Maybe Rect)
 type UpdaterTickModule a =  Module IO () a
 type UpdaterDef = (UpdaterTickModule (), Period)
 type DynamicWidgetDef = (Painter, Maybe UpdaterDef)
-
 
 drawStrings rs wd fn icons strings d = do
        let WidgetAttributes (Size ws hs) (Size x y) _ wbg _ _ = attr_ wd
@@ -1022,13 +1025,13 @@ makeWidget rs bgGraphs wd@(Graph attr (GraphDef typ tscale refresh_type) colors 
   let grInfo = extractGlobalGraphInfo wd
   let global = grInfo >>= flip lookup bgGraphs
   graphdata <- maybe (return $ makeGraph tscale (x_ $ size attr) (layers typ)) readIORef global
-  let sampler = sampleTask typ
+  sampler <- makeSampler typ
   refgraph <- newIORef []
   makeUpdatingWidget rate RefGraphPainter refgraph $ updater sampler graphdata
   where
     updater sampler' graphdata' = Module $ \_  -> do
         let WidgetAttributes (Size ws hs) _  _ _ _ _ = attr
-        (sample, sampler'') <- runModule sampler' ()
+        (sample, sampler'') <- readSample sampler'
         let graphdata'' = updateGraph ws graphdata' sample
         let samp = transpose . fmap (scaleG hs . reverse . tail . scanl (+) 0) . take ws . exportGraph $ graphdata''
         return (samp, updater sampler'' graphdata'')
@@ -1036,8 +1039,8 @@ makeWidget rs bgGraphs wd@(Graph attr (GraphDef typ tscale refresh_type) colors 
 makeWidget rs bgGraphs wd@NetStatus { netdev_ = netdev, refreshRate = rate} = do
   let grInfo = extractGlobalGraphInfo wd
   grdata <- readIORef . fromJust $ lookup (fromJust grInfo) bgGraphs
-  let sampler = sampleTask (Net netdev)
-      fmt :: String -> [Int] -> String
+  sampler <- makeSampler (Net netdev)
+  let fmt :: String -> [Int] -> String
       fmt hdr v =
           let [inbound, _, outbound, _] = map (fmtBytes . round . (/realToFrac rate) . revf3 . fromIntegral) v
              in printf "%s In: %s/s : Out: %s/s" hdr inbound outbound
@@ -1047,7 +1050,7 @@ makeWidget rs bgGraphs wd@NetStatus { netdev_ = netdev, refreshRate = rate} = do
          [fmt "" sample, fmt "Avg" $ avgSamp samples ]
 
       updater sampler' graphdata' = Module $ \_ -> do
-          (sample, sampler'') <- runModule sampler' ()
+          (sample, sampler'') <- readSample sampler'
           let graphdata'' = updateGraph 20 graphdata' sample -- sync size with extractGlobalGraphInfo
           let msgs = printNet graphdata''
           return (msgs, updater sampler'' graphdata'')
@@ -1229,6 +1232,7 @@ eventLoop dpy parent_w bgGraphs painters wins tooltipInfo tooltipState = do
     event <- getEvent ev
     let mouseHit ww x y = mouseHitWins wins (ww, Just (Size (fi x) (fi y)))
 
+    --print $ "Event: " ++ show event
     case event of
        ClientMessageEvent {ev_window = ww, ev_data = 0:_} -> do
             painters' <- mapM (`execModule` RepaintUpdated) painters
