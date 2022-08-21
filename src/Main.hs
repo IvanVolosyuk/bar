@@ -340,14 +340,15 @@ makeFont :: RenderState -> TextAttributes -> IO XftFont
 makeFont RenderState { display = dpy } (TextAttributes _ _ fontName _) =
   xftFontOpenXlfd dpy (defaultScreenOfDisplay dpy) fontName
 
-localTimezone :: IO (UTCTime -> IO ZonedTime)
+type TimeConv = UTCTime -> IO ZonedTime
+localTimezone :: IO TimeConv
 localTimezone = do
   timezone <- getCurrentTimeZone
   return $ \utcTime -> do
     let localTime = utcToLocalTime timezone utcTime
     return $ ZonedTime localTime timezone
 
-otherTimezone :: String -> IO (UTCTime -> IO ZonedTime)
+otherTimezone :: String -> IO TimeConv
 otherTimezone timezone = do
   tz <- loadSystemTZ timezone
   return $ \utcTime -> do
@@ -721,14 +722,6 @@ instance (Monad m) => Arrow (Module m) where
 pipeModules :: (Monad m) => Module m b c -> Module m a b -> Module m a c
 pipeModules m2 m1 = m2 Cat.. m1
 
-{-
-pipeModules :: (Monad m, NFData a, NFData c) => Module m b c -> Module m a b -> Module m a c
-pipeModules m2 m1 = Module $ \a -> do
-        (b, m1') <- runModuleI m1 a
-        (c, m2') <- runModuleI m2 b
-        return (c, m2' `pipeModules` m1')
--}
-
 mkConst :: (Monad m) => b -> Module m a b
 mkConst v = Module $ \_ -> return (v, mkConst v)
 
@@ -745,56 +738,6 @@ mkFuncM f = Module $ \a -> do
   v <- f a
   return (v, mkFuncM f)
 
-accum :: (Monad m, NFData acc, NFData b) => acc -> (acc -> a -> (b, acc)) -> Module m a b
-accum acc f = Module $ \input -> do
-    let (output, acc') = f acc input
-    return (output, accum acc' f)
-
-delayedEcho :: (Monad m, NFData a) => a -> Module m a a
-delayedEcho acc = accum acc (,)
-
-delayedEcho' :: (Monad m, NFData a) => Module m a a
-delayedEcho' = Module $ \x -> return (x, delayedEcho x)
-
-statelessModule :: (Monad m, NFData b) => m b -> Module m a b
-statelessModule = mkConstM
-
-
-{- unused
-runModules :: (Monad m) => [Module m a b] -> a -> m ([b], [Module m a b])
-runModules [] _ = return ([], [])
-runModules (x:xs) a = do
-  (b, x') <- runModule x a
-  (bs, xs') <- runModules xs a
-  return (b:bs, x':xs')
-
-zipModules :: (Monad m) => [Module m a b] -> Module m a [b]
-zipModules ms = Module $ \a -> do
-  (bs, ms') <- runModules ms a
-  return (bs, zipModules ms')
-
-constModule :: (Monad m) => b -> Module m a b
-constModule v  = Module $ \_ -> do
-  return (v, constModule v)
--}
-
-{- Module seem like cannot be Monad as mf not doesn't persist over call
-instance (Monad m) => Monad (Module m a) where
-  (>>=) f mf = Module $ \inp -> do
-      (v, m1') <- runModule f inp
-      (v2, m2') <- runModule (mf v) inp
-      return (v2, pipeModules m1' m2')
--}
-
-debugCounter v = Module $ \_ -> do
-  print $ "counter: " ++ show v
-  return ((), debugCounter (v+1))
-
-{-
-dummy typ = proc _ -> do
-  t <- sampleTask typ -< ()
-  returnA -< t
--}
 
 sampleTask :: GraphType -> Module IO () GraphSample
 sampleTask Cpu = sampleTaskCpu [0,0,0,0,0]
@@ -804,14 +747,6 @@ sampleTask Cpu = sampleTaskCpu [0,0,0,0,0]
     let output = let (user:nice:sys:idle:io:_) = zipWith (-) cpu prev_cpu
                  in [sys + io, nice, user, idle]
     return (output, sampleTaskCpu cpu)
-
-{- cannot figure out memory leaks with proc
-sampleTask Cpu = proc _ -> do
-  cpu <- mkConstM readCPU -< ()
-  prev_cpu <- delayedEcho' -< cpu
-  returnA -< let (user:nice:sys:idle:io:_) = zipWith (-) cpu prev_cpu
-             in GraphSample [sys + io, nice, user, idle]
--}
 
 sampleTask Mem = mkConstM $ do
     mem <- readBatteryFile "/proc/meminfo"
@@ -847,23 +782,6 @@ sampleTask (Net netdev) = sampleTaskNetFirst
        let net = getNetBytes (nets ! netdev)  :: GraphSample
        runModule (sampleTaskNet (time, net)) ()
 
-
-{- cannot figure out memory leaks with proc
-sampleTask (Net netdev) = proc _ -> do
-  debugCounter 10 -< ()
-  time <- mkConstM getCurrentTime -< ()
-  nets <- mkConstM (readNetFile "/proc/net/dev") -< ()
-  let net = ($!) getNetBytes (nets ! netdev)  :: [Int]
-  (old_time, old_net) <- delayedEcho' -< (time, net)
-  let f x = log (x + 1)
-      f3 x = f x * f x * f x
-      dt = getDt time old_time :: Double
-      [inbound, outbound] = ($!) map (f3 . fromIntegral) $ zipWith (-) net old_net :: [Double]
-      maxspeed = f3 $ dt * 100000000 :: Double
-      output = ($!) map (truncate . max 0)
-          [inbound, maxspeed - inbound - outbound, outbound, 0] :: [Int]
-  returnA -< force output
--}
 
 data Rect = Rect Int Int Int Int deriving (Generic, NFData)
 
@@ -923,7 +841,7 @@ getBounds wd =
   in Rect (x_ pos) (y_ pos) (x_ sz) (y_ sz)
 
 -- Always updating graphs
-type BgGraphInfo = (GraphDef, Int, NominalDiffTime)
+type BgGraphInfo = (GraphDef, Int, Period)
 extractGlobalGraphInfo :: Widget -> Maybe BgGraphInfo
 extractGlobalGraphInfo (Graph attr graph@GraphDef { refresh_type_ = Always} _ refresh) = Just (graph, x_ $ size attr, refresh)
 extractGlobalGraphInfo NetStatus {refreshRate = r, netdev_ = n} = Just (GraphDef (Net n) LinearTime Always, 20, r)
@@ -962,14 +880,13 @@ makeBackgroundGraphs wins = do
 
 
 data Repaint = RepaintAll | RepaintUpdated deriving (Generic, NFData)
-type PaintWidgetCallback = Module IO Repaint (Maybe Rect)
 type PaintWindowModule = Module IO Repaint ()
 type TooltipInfo = (RenderState, Widget)
 
 type DrawCallback = IO (Maybe Rect)
 type UpdaterTickModule a =  Module IO () a
 type UpdaterDef = (UpdaterTickModule (), Period)
-type DynamicWidgetDef = (PaintWidgetCallback, Maybe UpdaterDef)
+type DynamicWidgetDef = (Painter, Maybe UpdaterDef)
 
 
 drawStrings rs wd fn icons strings d = do
@@ -981,57 +898,97 @@ drawStrings rs wd fn icons strings d = do
 
 makeIcons rs@RenderState { display = dpy} = makeIconCache dpy
 
-makeUpdatingPainterWithArg :: IORef (a -> IO (a, Maybe Rect))
-                            -> IORef Bool
-                            ->  a
-                            ->  Module IO Repaint (Maybe Rect)
-makeUpdatingPainterWithArg paint dirty arg = Module $ \repaint -> perform arg repaint
-    where
-       perform arg RepaintAll = do
-          writeIORef' dirty False
-          painter <- readIORef paint
-          (arg',rect) <- painter arg
-          return (rect, makeUpdatingPainterWithArg paint dirty arg')
-       perform arg RepaintUpdated = do
-          is_dirty <- readIORef dirty
-          if is_dirty
-             then perform arg RepaintAll
-             else return (Nothing, makeUpdatingPainterWithArg paint dirty arg)
+data TextPainter = TextPainter XftFont IconCache
 
+makeTextPainter rs tattr = do
+  fn <- makeFont rs tattr
+  icons <- makeIcons rs
+  return (TextPainter fn icons)
 
-makeUpdatingWidget :: NominalDiffTime -> UpdaterTickModule DrawCallback  -> IO DynamicWidgetDef
-makeUpdatingWidget rate updater = do
-  paint <- newIORef $ \_ -> return ( (), Nothing)
-  dirty <- newIORef False
-  let updateWrap = mkFuncM $ \drawable -> do
-          writeIORef' paint $ \_ -> do
-             mbrect <- drawable
-             return ((), mbrect)
-          writeIORef' dirty True
-  return (makeUpdatingPainterWithArg paint dirty (), Just (updateWrap `pipeModules` updater, rate))
+drawTextPainter rs wd (TextPainter fn icons) strings = do
+  (icons', rect) <- withDraw rs (drawStrings rs wd fn icons strings)
+  return (TextPainter fn icons', rect)
+
+data Painter = StaticTextPainter { textp_ :: TextPainter, staticstr_ :: [String] }
+             | RefTextPainter { textp_ :: TextPainter, strref_ :: IORef [String], refdirty_ :: IORef Bool}
+             | RefTitlePainter { textp_ :: TextPainter, strref_ :: IORef [String], refdirty_ :: IORef Bool}
+             | RefGraphPainter { refgraph_ :: IORef [GraphSample], refdirty_ :: IORef Bool }
+             | NoPainter
+
+makeUpdatingWidget rate constr ref updater  = do
+  refdirty <- newIORef True
+  let wrap updater' = Module $ \_ -> do
+        (val, updater'') <- runModule updater' ()
+        writeIORef' ref val
+        writeIORef' refdirty True
+        return ((), wrap updater'')
+  return (constr ref refdirty, Just (wrap updater, rate))
+
 
 makeUpdatingTextWidget :: RenderState -> Widget
                        -> NominalDiffTime
                        -> UpdaterTickModule [String]
                        -> IO DynamicWidgetDef
 makeUpdatingTextWidget rs wd rate text_updater = do
-  fn <- makeFont rs (tattr_ wd)
-  icons <- makeIcons rs
-  let updater text_updater' = Module $ \_ -> do
-        (text, text_updater'') <- runModule text_updater' ()
-        return (snd <$> withDraw rs (drawStrings rs wd fn icons text), updater text_updater'')
-  makeUpdatingWidget rate $ updater text_updater
+  textp <- makeTextPainter rs (tattr_ wd)
+  refstr <- newIORef []
+  makeUpdatingWidget rate (RefTextPainter textp) refstr text_updater
 
+drawIfUpdated rs wd p = do
+  let refdirty = refdirty_ p
+  is_dirty <- readIORef refdirty
+  if is_dirty
+     then do
+       writeIORef' refdirty False
+       draw rs wd RepaintAll p
+     else return (p, Nothing)
+
+
+draw rs wd RepaintAll p@(StaticTextPainter textp strings) = do
+  (textp', rect) <- drawTextPainter rs wd textp strings
+  return (p{textp_ = textp'}, rect)
+
+draw rs wd RepaintUpdated p@RefTextPainter{} = drawIfUpdated rs wd p
+draw rs wd RepaintUpdated p@RefTitlePainter{} = drawIfUpdated rs wd p
+draw rs wd RepaintUpdated p@RefGraphPainter{} = drawIfUpdated rs wd p
+
+draw rs wd RepaintAll p@RefTextPainter {textp_ = textp, strref_ = strref} = do
+  strings <- readIORef strref
+  (textp', rect) <- drawTextPainter rs wd textp strings
+  return (p{textp_ = textp'}, rect)
+
+draw rs wd RepaintAll p@RefTitlePainter {textp_ = textp, strref_ = strref} = do
+  strings <- readIORef strref
+  let empty = isNothing (listToMaybe strings >>= listToMaybe)
+  print $ "Title is empty: " ++ show empty
+  (if empty then unmapWindow else mapWindow) (display rs) (window rs)
+  (textp', rect) <- drawTextPainter rs wd textp strings
+  return (p{textp_ = textp'}, rect)
+
+draw rs wd@Graph{} RepaintAll p@(RefGraphPainter refgraph _) = do
+  samp <- readIORef refgraph
+  let colors = graphColorTable wd
+      WidgetAttributes sz pos  _ bg _ _ = attr_ wd
+      (Size ws hs, Size x0 y0) = (sz, pos)
+  let colorTable = map toColor colors
+  bounds <- withDraw rs $ \d -> do
+        drawRect (display rs) d bg x0 y0 ws hs
+        let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
+                            . zip [x0+ws-1,x0+ws-2..]) samp
+        mapM_ (drawColorSegment rs) $ zip segments colorTable
+        -- FIXME: update only changed part
+        return $ Just $ getBounds wd
+  return (p, bounds)
+
+-- catch all
+draw rs wd _ p = return (p, Nothing)
 
 -- Paint function, global timers, temporary timers
-makeWidget :: RenderState -> BgGraphs -> Widget -> IO (PaintWidgetCallback, Maybe UpdaterDef)
+makeWidget :: RenderState -> BgGraphs -> Widget -> IO (Painter, Maybe UpdaterDef)
 
 makeWidget rs _ wd@Label { label_ = msg } = do
-  fn <- makeFont rs (tattr_ wd)
-  icons <- makeIcons rs
-  let painter RepaintUpdated = return Nothing
-      painter RepaintAll = snd <$> withDraw rs (drawStrings rs wd fn icons [msg])
-  return (mkFuncM painter, Nothing)
+  textp <- makeTextPainter rs (tattr_ wd)
+  return (StaticTextPainter textp [msg], Nothing)
 
 makeWidget rs _ wd@Clock { refreshRate = rate } = do
   tz <- case tz_ wd of
@@ -1049,49 +1006,32 @@ makeWidget rs _ wd@Title {} = do
         --exitSuccess
         exitImmediately ExitSuccess
         return "a"
-
-  fn <- makeFont rs (tattr_ wd)
-  icons <- makeIcons rs
-  paint <- newIORef $ \_ -> return (icons, Nothing)
-  dirty <- newIORef False
+  textp <- makeTextPainter rs (tattr_ wd)
+  refstr <- newIORef []
+  refdirty <- newIORef True
   sender <- makeSenderX w
   runThread $ forever $ do
      -- doesn't work with multiple titles on multiple bars
      title <- getLine `catchIOError` terminate
-     writeIORef' paint $ \iconsA -> do
-         if title == ""
-            then unmapWindow dpy w
-            else mapWindow dpy w
-         withDraw rs (drawStrings rs wd fn iconsA [title])
-
-     writeIORef' dirty True
+     writeIORef' refstr [title]
+     writeIORef' refdirty True
      sendX sender
-  return (makeUpdatingPainterWithArg paint dirty icons, Nothing)
+  return (RefTitlePainter textp refstr refdirty, Nothing)
 
 makeWidget rs bgGraphs wd@(Graph attr (GraphDef typ tscale refresh_type) colors rate) = do
   let grInfo = extractGlobalGraphInfo wd
   let global = grInfo >>= flip lookup bgGraphs
   graphdata <- maybe (return $ makeGraph tscale (x_ $ size attr) (layers typ)) readIORef global
   let sampler = sampleTask typ
-  makeUpdatingWidget rate $ updater sampler graphdata
+  refgraph <- newIORef []
+  makeUpdatingWidget rate RefGraphPainter refgraph $ updater sampler graphdata
   where
     updater sampler' graphdata' = Module $ \_  -> do
-        let WidgetAttributes sz pos  _ bg _ _ = attr
-            (Size ws hs, Size x0 y0) = (sz, pos)
+        let WidgetAttributes (Size ws hs) _  _ _ _ _ = attr
         (sample, sampler'') <- runModule sampler' ()
         let graphdata'' = updateGraph ws graphdata' sample
         let samp = transpose . fmap (scaleG hs . reverse . tail . scanl (+) 0) . take ws . exportGraph $ graphdata''
-        let colorTable = map toColor colors
-        let painter = withDraw rs $ \d -> do
-              drawRect (display rs) d bg x0 y0 ws hs
-              let segments = map (map (makeSegment y0 hs) . filter ((/=0) . snd)
-                                  . zip [x0+ws-1,x0+ws-2..]) samp
-              -- print ("Paint Graph", segments, samp)
-              mapM_ (drawColorSegment rs) $ zip segments colorTable
-              -- FIXME: update only changed part
-              return $ Just $ getBounds wd
-
-        return (painter, updater sampler'' graphdata'')
+        return (samp, updater sampler'' graphdata'')
 
 makeWidget rs bgGraphs wd@NetStatus { netdev_ = netdev, refreshRate = rate} = do
   let grInfo = extractGlobalGraphInfo wd
@@ -1175,11 +1115,11 @@ makeWidget rs _ wd@Trayer {} = do
         cmd = trayerCmd (windowHeight rs) $ windowWidth rs - x_ pos - x_ sz
     print ("trayer cmd ", cmd)
     handle <- runCommand cmd
-    return (mkConst Nothing, Nothing)
+    return (NoPainter, Nothing)
 
 makeWidget rs _ wd = do
    print $ "Not implemented: " ++ show rs
-   return (mkConst Nothing, Nothing)
+   return (NoPainter, Nothing)
 
 
 inbounds :: WidgetAttributes -> Size -> Bool
@@ -1205,10 +1145,10 @@ maybeCopyArea rs (Just (Rect x y width height)) = do
    sync dpy False
 
 
-paintWindow :: RenderState -> [PaintWidgetCallback] -> PaintWindowModule
+paintWindow :: RenderState -> [(Widget,Painter)] -> PaintWindowModule
 paintWindow rs drawableWidgets = Module $ \repaint -> do
    rootRect <- paintBackground rs repaint
-   res <- mapM (`runModule` repaint ) drawableWidgets
+   res <- mapM (drawWrap rs repaint ) drawableWidgets
    let (mbRects, drawableWidgets') = unzip res -- FIXME ($)
    let mbRect = combinedRects $ catMaybes (rootRect:mbRects)
    maybeCopyArea rs mbRect
@@ -1222,34 +1162,13 @@ paintWindow rs drawableWidgets = Module $ \repaint -> do
 
         combinedRects [] = Nothing
         combinedRects (x:xs) = Just $ foldr mergeRect x xs
+        drawWrap rs repaint (wd, p) = do
+          (p', mbrect) <- draw rs wd repaint p
+          return (mbrect, (wd, p'))
 
 runThread :: IO () -> IO ThreadId
 runThread = forkIO
 
-allRec :: M.Map String Int -> a -> IO (M.Map String Int)
-allRec m v = do
-  c <- Heap.getClosureData v
-  let i = show c
-  let l = M.lookup i m
-  handle m i c l
-    where
-       handle m i c (Just _) = return m
-       handle m i c Nothing = do
-             let m' = M.insert i 1 m
-             let cc = Closures.allClosures c
-             if null cc
-                then
-                  return m'
-                else do
-                    -- print $ show $ Closures.info c
-                    foldM allRec m' cc
-
-examine :: String -> a -> IO ()
-examine label a = do
-   let m = M.empty
-   m' <- allRec m a
-   print $ label ++ ", size " ++ show (M.size m')
-   return ()
 
 updateStep :: IO () -> [(Module IO () (), Period)] -> IO ()
 updateStep onupdated timers = do
@@ -1298,7 +1217,7 @@ initWidgets dpy parent_w bgGraphs (rs, widgets) = do
   sender <- makeSenderX  parent_w
   -- global timers thread
   tid <- runThread $ updateStep (sendX sender) timers
-  return (paintWindow rs drawables, tid)
+  return (paintWindow rs (zip widgets drawables), tid)
 
 
 eventLoop :: Display -> Window -> BgGraphs -> [PaintWindowModule] -> [WindowState]

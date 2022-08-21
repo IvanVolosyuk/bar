@@ -1,5 +1,6 @@
 
 module Top (
+  CpuTopData,
   pickCpuUsage,
   makeCpuDiff,
   memInfo
@@ -67,8 +68,9 @@ readFiles (pid:pids) = do
     Just c -> do
       others <- readFiles pids
       return (c:others)
-  
-pickCpuUsage :: IO (M.Map String (String, Int))
+
+type CpuTopData = M.Map String (String, Int)
+pickCpuUsage :: IO CpuTopData
 pickCpuUsage = ($!) M.fromList <$> pickProcValues cpuSelector
 
 pickProcValues :: ([String] -> t) -> IO [(String, (String, t))]
@@ -83,7 +85,7 @@ memInfo = do
   mem <- pickProcValues memSelector :: IO [(String, (String, Int))]
   ($!) return $! map display . take 6 . sortBy (flip compare `on` snd) . map snd $ mem where
     display (name, val) = printf " %7s - %s" (fmtBytes val) name :: String
-  
+
 
 cpuSelector :: [String] -> Int
 cpuSelector = sum . map read . take 2 . drop 13
