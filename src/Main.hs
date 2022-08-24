@@ -538,7 +538,6 @@ layoutWidgets orien wsz wds =
 windowMapAndSelectInput :: Display -> Window -> Word64 -> IO ()
 windowMapAndSelectInput dpy w mask = do
   selectInput dpy w mask
-  xrrSelectInput dpy w mask
   mapWindow dpy w
   sync dpy False
   flush dpy
@@ -828,7 +827,7 @@ draw rs wd RepaintUpdated p@RefTitlePainter{current_title_ = prev} = do
 draw rs wd RepaintAll p@RefTitlePainter {textp_ = textp} = do
   title <- readIORef (titleRef_ rs)
   let empty = title == ""
-  print $ "Title is empty: " ++ show empty
+  --print $ "Title is empty: " ++ show empty
   (if empty then unmapWindow else mapWindow) (display_ rs) (window_ rs)
   (textp', rect) <- drawTextPainter rs wd textp [ title ]
   return (p{textp_ = textp', current_title_ = title}, rect)
@@ -868,7 +867,7 @@ makeBar dpy titleRef barDef@(Bar _ _ screen _ _) = do
   print $ "dimensions: " ++ show dimensions
   case dimensions of
     Nothing -> return Nothing
-    Just d -> makeBar' dpy titleRef barDef d
+    Just d -> Just <$> makeBar' dpy titleRef barDef d
 
 makeBar' dpy titleRef (Bar bg height screen gravity wds) (scX, scY, scWidth, scHeight) = do
   -- left, right, top, bottom,
@@ -906,17 +905,17 @@ makeBar' dpy titleRef (Bar bg height screen gravity wds) (scX, scY, scWidth, scH
   winType <- internAtom dpy "_NET_WM_WINDOW_TYPE" False
   changeProperty32 dpy w winType aTOM propModeReplace [fi dockAtom]
 
+  xrrSelectInput dpy w rrScreenChangeNotifyMask
   windowMapAndSelectInput dpy w $ exposureMask
                               .|. structureNotifyMask
                               .|. buttonPressMask
                               .|. enterWindowMask
                               .|. leaveWindowMask
                               .|. pointerMotionMask
-                              .|. rrScreenChangeNotifyMask
 
   wds' <- catMaybes <$> mapM removeBroken wds
   let widgets = layoutWidgets Horizontal (Size (fi scWidth) height) wds'
-  Just <$> initWidgets rs widgets
+  initWidgets rs widgets
 
 
 makeTooltip :: RenderState -> Widget -> Tooltip -> IO (WindowPainter, [UpdaterDef])
@@ -999,6 +998,18 @@ makeGlobalGraphs wins = do
       allLongest = M.fromListWith max $ globalGraphs ++ hidden
       global = M.fromList globalGraphs
   M.intersection allLongest global
+
+
+changeGraphs graphs wins = do
+  let targetGraphDefs = makeGlobalGraphs wins
+  let newGraphDefs = M.difference targetGraphDefs graphs
+  newGraphs <- M.fromAscList <$> mapM populateGraph (M.toAscList newGraphDefs)
+  return $ M.intersection (M.union graphs newGraphs) targetGraphDefs
+  where
+    populateGraph :: (GraphKey, Int) -> IO (GraphKey, GraphValue)
+    populateGraph (key@(GraphKey typ tscale period), ws) = do
+      sampler <- makeSampler typ
+      return (key, ((ws, sampler), makeGraph tscale ws (layers typ)))
 
 
 -- Paint function, global timers, temporary timers
@@ -1207,7 +1218,7 @@ handleEvent state@(MainState wins tooltipInfo _ _ _) = do
     event <- getEvent ev
     let mouseHit ww x y = mouseHitWins wins (ww, Just (Size (fi x) (fi y)))
 
-    print $ "Event: " ++ show event
+    --print $ "Event: " ++ show event
     case event of
        ClientMessageEvent {ev_window = ww, ev_data = 0:_} -> do
             wins' <- mapM (paintWindow RepaintUpdated) wins
@@ -1238,12 +1249,6 @@ handleEvent state@(MainState wins tooltipInfo _ _ _) = do
        _ -> return (tooltipInfo, state)
 
 
-populateGraph :: (GraphKey, Int) -> IO (GraphKey, GraphValue)
-populateGraph (key@(GraphKey typ tscale period), ws) = do
-  sampler <- makeSampler typ
-  return (key, ((ws, sampler), makeGraph tscale ws (layers typ)))
-
-
 mbChangeTooltip (tooltipInfo, state@(MainState wins prev_tooltipInfo ref tid titleTid)) =
   if prev_tooltipInfo == tooltipInfo
     then return state
@@ -1251,10 +1256,7 @@ mbChangeTooltip (tooltipInfo, state@(MainState wins prev_tooltipInfo ref tid tit
       killSenderThread tid
       (dt, graphs, globalTimers, _) <- readIORef ref
       (wins', tooltipTimers) <- destroyTooltip prev_tooltipInfo wins >>= createTooltip tooltipInfo
-      let targetGraphDefs = makeGlobalGraphs wins'
-      let newGraphDefs = M.difference targetGraphDefs graphs
-      newGraphs <- M.fromAscList <$> mapM populateGraph (M.toAscList newGraphDefs)
-      let graphs' = M.intersection (M.union graphs newGraphs) targetGraphDefs
+      graphs' <- changeGraphs graphs wins'
       let state' = (dt, graphs', globalTimers, tooltipTimers)
       writeIORef' ref state'
       tid' <- runSenderThread (window_ $ aRs wins') $ updateStep  ref
@@ -1297,40 +1299,37 @@ makeTitleThread rs = do
      onupdated
 
 
-restartBars :: MainState -> IO (Maybe TooltipInfo, MainState)
-restartBars (MainState wins mbtooltip ref tid titleTid) = do
-  let old_rs = aRs wins
-  let RenderState {display_ = olddpy, titleRef_ = titleRef } = old_rs
+initMainState graphs titleRef = do
+  dpy <- openDisplay ""
+  (wins, updaters) <- unzip . catMaybes <$> mapM (makeBar dpy titleRef) bars
+  graphs' <- changeGraphs graphs wins
+  ref <- newIORef (0, graphs', concat updaters, [])
+  titleTid <- makeTitleThread $ aRs wins
+  tid <- runSenderThread (window_ $ aRs wins) $ updateStep ref
+  return (MainState wins Nothing ref tid titleTid)
 
-  print "Restarting"
+
+destroyMainState (MainState wins mbtooltip ref tid titleTid) = do
+  let dpy = display_ $ aRs wins
   killSenderThread titleTid
   killSenderThread tid
   mapM_ destroyWin wins
-  closeDisplay olddpy
+  closeDisplay dpy
 
-  dpy <- openDisplay ""
-  (dt, graphs, _, _) <- readIORef ref
-  (wins, updaters) <- unzip . catMaybes <$> mapM (makeBar dpy titleRef) bars
-  titleTid <- makeTitleThread $ aRs wins
-  writeIORef' ref (dt, graphs, concat updaters, [])
-  tid <- runSenderThread (window_ $ aRs wins) $ updateStep ref
+
+restartBars :: MainState -> IO (Maybe TooltipInfo, MainState)
+restartBars state@(MainState wins _ ref _ _) = do
+  print "Restarting"
+  let titleRef = titleRef_ (aRs wins)
+  destroyMainState state
+  (_, graphs, _, _) <- readIORef ref
+  state' <- initMainState graphs titleRef
   print "Restarted"
-  return (Nothing, MainState wins Nothing ref tid titleTid)
+  return (Nothing, state')
 
 
 main :: IO ()
 main = do
   xSetErrorHandler
-  initThreads
-  dpy <- openDisplay ""
-  sender <- makeSenderX
-
   titleRef <- newIORef "?"
-  (wins, updaters) <- unzip . catMaybes <$> mapM (makeBar dpy titleRef) bars
-
-  let graphDefs = makeGlobalGraphs wins
-  graphs <- M.fromAscList <$> mapM populateGraph (M.toAscList graphDefs)
-  ref <- newIORef (0, graphs, concat updaters, [])
-  tid <- runSenderThread (window_ $ aRs wins) $ updateStep ref
-  titleTid <- makeTitleThread $ aRs wins
-  eventLoop (MainState wins Nothing ref tid titleTid)
+  initMainState M.empty titleRef >>= eventLoop
