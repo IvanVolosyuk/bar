@@ -68,12 +68,12 @@ trayerCmd :: Int -> Int -> String
 trayerCmd = printf "trayer --expand false --edge top --align right\
              \ --widthtype request --height %d --margin %d"
 
-bars :: [Bar]
---bars = [bar1, bar2]
-bars = [bar1]
+--bars :: [Bar]
+bars = [bar1, bar2]
+--bars = [bar1]
 
 bar1 :: Bar
-bar1 = Bar barBackground barHeight (XineramaScreen 0) GravityTop [
+bar1 = Bar barBackground barHeight DefaultScreen GravityTop [
         clock # TimeFormat "%R" # RefreshRate 60 # OnClick "clock.sh"
               # Width 60 # RightPadding 4
               # LocalTimeZone # BackgroundColor infoBackground
@@ -94,7 +94,7 @@ bar1 = Bar barBackground barHeight (XineramaScreen 0) GravityTop [
       ]
 
 bar2 :: Bar
-bar2 = Bar barBackground (barHeight*2) (XineramaScreen 0) GravityBottom [
+bar2 = Bar barBackground barHeight (XineramaScreen 1) GravityBottom [
         clock # TimeFormat "%R" #RefreshRate 60 #
             Width 60 # RightPadding 4 #
             LocalTimeZone # BackgroundColor infoBackground #
@@ -855,20 +855,22 @@ draw rs wd _ p = return (p, Nothing)
 
 type WindowPainter = (RenderState, [(Widget, Painter)])
 
-makeBar :: Display -> IORef String -> Bar -> IO (WindowPainter, [UpdaterDef])
-makeBar dpy titleRef (Bar bg height screen gravity wds) = do
+makeBar :: Display -> IORef String -> Bar -> IO (Maybe (WindowPainter, [UpdaterDef]))
+makeBar dpy titleRef barDef@(Bar _ _ screen _ _) = do
 
   let scr = defaultScreen dpy
-  xiscr <- case screen of
-       DefaultScreen -> return Nothing
-       XineramaScreen x -> maybe Nothing (find (\s -> xsi_screen_number s == fi x))
-                          <$> xineramaQueryScreens dpy
-  forM_ xiscr $ \a -> print a
+  dimensions <- case screen of
+       DefaultScreen -> return $ Just (0, 0, displayWidth dpy scr, displayHeight dpy scr)
+       XineramaScreen x -> do
+          xiscr <- maybe Nothing (find (\s -> xsi_screen_number s == fi x)) <$> xineramaQueryScreens dpy
+          return $ fmap (\xi -> (xsi_x_org xi, xsi_y_org xi, fi (xsi_width xi), fi (xsi_height xi))) xiscr
 
-  let (scX, scY, scWidth, scHeight) = case xiscr of
-       Nothing -> (0, 0, displayWidth dpy scr, displayHeight dpy scr)
-       Just xi -> (xsi_x_org xi, xsi_y_org xi, fi (xsi_width xi), fi (xsi_height xi))
+  print $ "dimensions: " ++ show dimensions
+  case dimensions of
+    Nothing -> return Nothing
+    Just d -> makeBar' dpy titleRef barDef d
 
+makeBar' dpy titleRef (Bar bg height screen gravity wds) (scX, scY, scWidth, scHeight) = do
   -- left, right, top, bottom,
   -- left_start_y, left_end_y, right_start_y, right_end_y,
   -- top_start_x, top_end_x, bottom_start_x, bottom_end_x
@@ -881,6 +883,7 @@ makeBar dpy titleRef (Bar bg height screen gravity wds) = do
                      0, 0, 0, 0,
                      0, 0, fi scX, fi scX + fi scWidth - 1])
 
+  let scr = defaultScreen dpy
   rootwin <- rootWindow dpy scr
   w <- createWindow dpy rootwin
                     (fi scX) (fi y) (fi scWidth) (fi height)
@@ -913,7 +916,7 @@ makeBar dpy titleRef (Bar bg height screen gravity wds) = do
 
   wds' <- catMaybes <$> mapM removeBroken wds
   let widgets = layoutWidgets Horizontal (Size (fi scWidth) height) wds'
-  initWidgets rs widgets
+  Just <$> initWidgets rs widgets
 
 
 makeTooltip :: RenderState -> Widget -> Tooltip -> IO (WindowPainter, [UpdaterDef])
@@ -1307,7 +1310,7 @@ restartBars (MainState wins mbtooltip ref tid titleTid) = do
 
   dpy <- openDisplay ""
   (dt, graphs, _, _) <- readIORef ref
-  (wins, updaters) <- unzip <$> mapM (makeBar dpy titleRef) bars
+  (wins, updaters) <- unzip . catMaybes <$> mapM (makeBar dpy titleRef) bars
   titleTid <- makeTitleThread $ aRs wins
   writeIORef' ref (dt, graphs, concat updaters, [])
   tid <- runSenderThread (window_ $ aRs wins) $ updateStep ref
@@ -1323,7 +1326,7 @@ main = do
   sender <- makeSenderX
 
   titleRef <- newIORef "?"
-  (wins, updaters) <- unzip <$> mapM (makeBar dpy titleRef) bars
+  (wins, updaters) <- unzip . catMaybes <$> mapM (makeBar dpy titleRef) bars
 
   let graphDefs = makeGlobalGraphs wins
   graphs <- M.fromAscList <$> mapM populateGraph (M.toAscList graphDefs)
