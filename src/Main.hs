@@ -107,8 +107,8 @@ bar2 = Bar barBackground (barHeight*2) (XineramaScreen 0) GravityBottom [
       ]
 
 clockTooltip :: Tooltip
-clockTooltip = Tooltip tooltipBackground (Size 460 (barHeight * 5)) Vertical [
-     tooltipClock #TimeFormat "%a, %e %b - %X" #JustifyMiddle
+clockTooltip = Tooltip tooltipBackground (Size 560 (barHeight * 5)) Vertical [
+     tooltipClock #TimeFormat "[%U] %a, %e %b - %X" #JustifyMiddle
               # Height (barHeight * 2) # RightPadding 4 # LocalTimeZone
               #SetFont largeFont #SetTextHeight (2 *barHeight),
      frame Horizontal [
@@ -176,7 +176,7 @@ tooltipText w = tooltip w  #TextColor "#000000"
               #SetFont "-*-courier new-*-r-normal-*-17-*-*-*-*-*-*-*"
 
 tooltipClock :: Widget
-tooltipClock = tooltipText clock #TimeFormat "^fg(red)%a, %e %b %Y - %X" #JustifyLeft
+tooltipClock = tooltipText clock #TimeFormat "%a, %e %b %Y - %X" #JustifyLeft
 
 tooltipLabel :: Widget
 tooltipLabel = tooltipText label
@@ -374,7 +374,6 @@ data RenderState = RenderState {
   windowHeight :: Int,
   windowBackground :: String,
   pos :: (Int, Int, Int, Int, Int, Int),
-  sender_ :: SenderX,
   titleRef_ :: IORef String
 }
 
@@ -559,23 +558,16 @@ sendClientEvent d a w val = do
     sync d False
 
 makeSenderX = do
-  print "Open Display: Too many calls"
   d <- openDisplay ""
   a <- internAtom d "BAR_UPDATE" False
   return $ SenderX d a
 
-sendX :: RenderState -> IO ()
-sendX rs = do
-  sendX' (sender_ rs) (window rs)
 
-sendX2 = sendX . fst . head
-
-sendX' :: SenderX -> Window -> IO ()
-sendX' (SenderX dpy a) w = do
+sendX :: SenderX -> Window -> IO ()
+sendX (SenderX dpy a) w = do
   sendClientEvent dpy a w 0 `catchIOError`  \x -> do
        print $ "Exception caught: " ++ show x
        sync dpy False
-
 
 
 checkBattery wd n = do
@@ -596,8 +588,8 @@ removeBroken wd@NetStatus {netdev_ = n} = checkNetdev wd n
 removeBroken wd = return $ Just wd
 
 
-makeBar :: Display -> SenderX -> IORef String -> Bar -> IO (WindowPainter, [UpdaterDef])
-makeBar dpy sender titleRef (Bar bg height screen gravity wds) = do
+makeBar :: Display -> IORef String -> Bar -> IO (WindowPainter, [UpdaterDef])
+makeBar dpy titleRef (Bar bg height screen gravity wds) = do
 
   let scr = defaultScreen dpy
   xiscr <- case screen of
@@ -633,7 +625,7 @@ makeBar dpy sender titleRef (Bar bg height screen gravity wds) = do
                          windowWidth = fi scWidth, windowHeight = height,
                          windowBackground = bg,
                          pos = (fi scX, fi y, fi scX, fi scY, fi scWidth, fi scHeight),
-                         sender_ = sender, titleRef_ = titleRef} -- FIXME: cleanup
+                         titleRef_ = titleRef} -- FIXME: cleanup
 
   strutPartial <- internAtom dpy "_NET_WM_STRUT_PARTIAL" False
   changeProperty32 dpy w strutPartial cARDINAL propModeReplace strutValues
@@ -748,7 +740,6 @@ combinePaints paints = M.elems $ foldr f M.empty paints where
 makeTooltip :: RenderState -> Widget -> Tooltip -> IO (WindowPainter, [UpdaterDef])
 makeTooltip parent_rs pwd tip = do
   let RenderState { display = dpy,
-                    sender_ = sender,
                     titleRef_ = titleRef} = parent_rs
   let Tooltip bg tsz@(Size width height) orien widgets = tip
   let (px, py, scX, scY, scWidth, scHeight) = pos parent_rs
@@ -785,7 +776,7 @@ makeTooltip parent_rs pwd tip = do
 
   let rs = RenderState dpy w buf gc width height bg
                         (x, y_ place, scX, scY, scWidth, scHeight)
-                        sender titleRef
+                        titleRef
   initWidgets rs widgets
 
 getBounds wd =
@@ -1019,10 +1010,10 @@ makeTitleThread rs = do
         --exitSuccess
         exitImmediately ExitSuccess
         return "a"
-  runThread $ forever $ do
+  runSenderThread (window rs) $ \onupdated -> forever $ do
      title <- getLine `catchIOError` terminate
      writeIORef' titleRef title
-     sendX rs
+     onupdated
 
 -- Paint function, global timers, temporary timers
 makeWidget :: RenderState -> Widget -> IO (Painter, Maybe UpdaterDef)
@@ -1115,7 +1106,7 @@ paintWindow repaint (rs, drawableWidgets) = do
    where
         paintBackground rs RepaintUpdated = return Nothing
         paintBackground rs RepaintAll = do
-          let RenderState dpy ww b gc w h bg _ _ _ = rs
+          let RenderState dpy ww b gc w h bg _ _ = rs
           withDraw rs $ \d -> drawRect dpy d bg 0 0 w h
           return $ Just $ Rect 0 0 (fi w) (fi h)
 
@@ -1128,13 +1119,28 @@ paintWindow repaint (rs, drawableWidgets) = do
 runThread :: IO () -> IO ThreadId
 runThread = forkIO
 
+type SenderThreadId = (ThreadId, SenderX)
+
+runSenderThread :: Window -> (IO () -> IO ()) -> IO SenderThreadId
+runSenderThread window task = do
+  sender <- makeSenderX
+  tid <- forkIO $ task (sendX sender window)
+  return (tid, sender)
+
+
+killSenderThread :: SenderThreadId -> IO ()
+killSenderThread (tid, SenderX dpy _) = do
+  killThread tid
+  closeDisplay dpy
+
+
 type UpdaterThreadState = (NominalDiffTime, -- tm
                           GlobalGraphs,
                           [(Updater, Period)], -- global
                           [(Updater, Period)]) -- tooltip
 
-updateStep :: IO () -> IORef UpdaterThreadState -> IO ()
-updateStep onupdated ref = do
+updateStep :: IORef UpdaterThreadState -> IO () -> IO ()
+updateStep ref onupdated = do
     let min_period [] = 3600 -- empty thread doing nothing
         min_period timers = minimum $ map snd timers
     state@(_, _, global_timers, tooltip_timers) <- readIORef ref
@@ -1202,20 +1208,20 @@ initWidgets rs widgets = do
 data MainState = MainState {
   windows_ :: [WindowPainter],
   mbtooltip_ :: Maybe TooltipInfo,
-  thread_ :: ThreadId,
   ref_ :: IORef UpdaterThreadState,
-  titleThread_ :: ThreadId}
+  thread_ :: SenderThreadId,
+  titleThread_ :: SenderThreadId}
 
 handleEvent :: MainState -> IO (Maybe TooltipInfo, MainState)
 handleEvent state@(MainState wins tooltipInfo _ _ _) = do
-  let dpy = display $ fst $ head wins
+  let dpy = display $ aRs wins
   allocaXEvent $ \ev -> do
 
     nextEvent dpy ev
     event <- getEvent ev
     let mouseHit ww x y = mouseHitWins wins (ww, Just (Size (fi x) (fi y)))
 
-    --print $ "Event: " ++ show event
+    print $ "Event: " ++ show event
     case event of
        ClientMessageEvent {ev_window = ww, ev_data = 0:_} -> do
             wins' <- mapM (paintWindow RepaintUpdated) wins
@@ -1240,10 +1246,8 @@ handleEvent state@(MainState wins tooltipInfo _ _ _) = do
                  then mouseHit ww x y
                  else Nothing
             return (hit, state)
-       e@RROutputChangeNotifyEvent  {} -> do
-         --return (tooltipInfo, state)
-         s <- restartBars state
-         return (Nothing, s)
+       e@RROutputChangeNotifyEvent  {} -> restartBars state
+       e@RRScreenChangeNotifyEvent  {} -> restartBars state
 
        _ -> return (tooltipInfo, state)
 
@@ -1253,12 +1257,14 @@ populateGraph (key@(GraphKey typ tscale period), ws) = do
   sampler <- makeSampler typ
   return (key, ((ws, sampler), makeGraph tscale ws (layers typ)))
 
+-- any render state from [WindowPainter]
+aRs = fst . head
 
-mbChangeTooltip (tooltipInfo, state@(MainState wins prev_tooltipInfo tid ref titleTid)) =
+mbChangeTooltip (tooltipInfo, state@(MainState wins prev_tooltipInfo ref tid titleTid)) =
   if prev_tooltipInfo == tooltipInfo
     then return state
     else do
-      killThread tid
+      killSenderThread tid
       (dt, graphs, globalTimers, _) <- readIORef ref
       (wins', tooltipTimers) <- destroyTooltip prev_tooltipInfo wins >>= createTooltip tooltipInfo
       let targetGraphDefs = makeGlobalGraphs wins'
@@ -1267,8 +1273,8 @@ mbChangeTooltip (tooltipInfo, state@(MainState wins prev_tooltipInfo tid ref tit
       let graphs' = M.intersection (M.union graphs newGraphs) targetGraphDefs
       let state' = (dt, graphs', globalTimers, tooltipTimers)
       writeIORef' ref state'
-      tid <- runThread $ updateStep (sendX2 wins') ref
-      return $ MainState wins' tooltipInfo tid ref titleTid
+      tid' <- runSenderThread (window $ aRs wins') $ updateStep  ref
+      return $ MainState wins' tooltipInfo ref tid' titleTid
 
 
 destroyTooltip Nothing wins = return wins
@@ -1294,38 +1300,40 @@ destroyWin (rs, _) = do
   destroyWindow (display rs) (window rs)
 
 
-restartBars :: MainState -> IO MainState
-restartBars (MainState wins mbtooltip tid ref titleTid) = do
-  let old_rs = fst . head $ wins
-  let RenderState {sender_ = sender, display = olddpy, titleRef_ = titleRef } = old_rs
+restartBars :: MainState -> IO (Maybe TooltipInfo, MainState)
+restartBars (MainState wins mbtooltip ref tid titleTid) = do
+  let old_rs = aRs wins
+  let RenderState {display = olddpy, titleRef_ = titleRef } = old_rs
 
-  print "Restarting Bars"
-  killThread titleTid
-  killThread tid
+  print "Restarting"
+  killSenderThread titleTid
+  killSenderThread tid
   mapM_ destroyWin wins
   closeDisplay olddpy
 
   dpy <- openDisplay ""
   (dt, graphs, _, _) <- readIORef ref
-  (wins, updaters) <- unzip <$> mapM (makeBar dpy sender titleRef) bars
-  titleTid <- makeTitleThread $ fst . head $ wins
+  (wins, updaters) <- unzip <$> mapM (makeBar dpy titleRef) bars
+  titleTid <- makeTitleThread $ aRs wins
   writeIORef' ref (dt, graphs, concat updaters, [])
-  tid <- runThread $ updateStep (sendX2 wins) ref
-  return $ MainState wins Nothing tid ref titleTid
+  tid <- runSenderThread (window $ aRs wins) $ updateStep ref
+  print "Restarted"
+  return (Nothing, MainState wins Nothing ref tid titleTid)
 
 
 main :: IO ()
 main = do
   xSetErrorHandler
+  initThreads
   dpy <- openDisplay ""
   sender <- makeSenderX
 
   titleRef <- newIORef "?"
-  (wins, updaters) <- unzip <$> mapM (makeBar dpy sender titleRef) bars
+  (wins, updaters) <- unzip <$> mapM (makeBar dpy titleRef) bars
 
   let graphDefs = makeGlobalGraphs wins
   graphs <- M.fromAscList <$> mapM populateGraph (M.toAscList graphDefs)
   ref <- newIORef (0, graphs, concat updaters, [])
-  tid <- runThread $ updateStep (sendX2 wins) ref
-  titleTid <- makeTitleThread $ fst . head $ wins
-  eventLoop (MainState wins Nothing tid ref titleTid)
+  tid <- runSenderThread (window $ aRs wins) $ updateStep ref
+  titleTid <- makeTitleThread $ aRs wins
+  eventLoop (MainState wins Nothing ref tid titleTid)
