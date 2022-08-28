@@ -1138,9 +1138,11 @@ updateStep :: IORef UpdaterThreadState -> IO () -> IO ()
 updateStep ref onupdated = do
     let min_period [] = 3600 -- empty thread doing nothing
         min_period timers = minimum $ map snd timers
-    state@(_, _, global_timers, tooltip_timers) <- readIORef ref
+    state@(tm, graphs, global_timers, tooltip_timers) <- readIORef ref
     let mp = min_period $ global_timers ++ tooltip_timers
-    print $ "Min refresh rate: " ++ show mp
+    print $ "Min refresh rate: " ++ show mp 
+    -- initialize tooltip refs from the current graphs and ignore state changes
+    mapM_ (updateOne graphs 0 (tm-mp)) tooltip_timers
     iterateM_ (updateStep' onupdated ref mp) state
 
 updateStep' :: IO () -> IORef UpdaterThreadState -> NominalDiffTime -> UpdaterThreadState -> IO UpdaterThreadState
