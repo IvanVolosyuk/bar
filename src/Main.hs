@@ -73,7 +73,7 @@ bars = [bar1, bar2]
 --bars = [bar1]
 
 bar1 :: Bar
-bar1 = Bar barBackground barHeight DefaultScreen GravityTop [
+bar1 = Bar barBackground barHeight (XineramaScreen 0) GravityTop [
         clock # TimeFormat "%R" # RefreshRate 60 # OnClick "clock.sh"
               # Width 60 # RightPadding 4
               # LocalTimeZone # BackgroundColor infoBackground
@@ -94,12 +94,12 @@ bar1 = Bar barBackground barHeight DefaultScreen GravityTop [
       ]
 
 bar2 :: Bar
-bar2 = Bar barBackground barHeight (XineramaScreen 1) GravityBottom [
+bar2 = Bar barBackground barHeight (XineramaScreen 1) GravityTop [
         clock # TimeFormat "%R" #RefreshRate 60 #
             Width 60 # RightPadding 4 #
             LocalTimeZone # BackgroundColor infoBackground #
             clockTooltip,
-        logtm cpu # cpuTooltip # OnClick "top.sh" #LinearTime # RefreshRate 0.02,
+        logtm cpu # cpuTooltip # OnClick "top.sh" #LinearTime # RefreshRate 1,
 
         title # LeftPadding 2 # RightPadding 2 #
                 BackgroundColor barBackground #
