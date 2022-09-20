@@ -539,6 +539,7 @@ windowMapAndSelectInput :: Display -> Window -> Word64 -> IO ()
 windowMapAndSelectInput dpy w mask = do
   selectInput dpy w mask
   mapWindow dpy w
+  lowerWindow dpy w
   sync dpy False
   flush dpy
 
