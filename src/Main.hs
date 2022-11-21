@@ -78,6 +78,7 @@ bar1 = Bar barBackground barHeight DefaultScreen GravityTop [
               # Width 60 # RightPadding 4
               # LocalTimeZone # BackgroundColor infoBackground
               # clockTooltip,
+        cpuBars,
         logtm cpu # cpuTooltip # OnClick "top.sh",
         logtm mem # memTooltip,
         logtm (net "eth0"),
@@ -99,6 +100,7 @@ bar2 = Bar barBackground barHeight (XineramaScreen 1) GravityBottom [
             Width 60 # RightPadding 4 #
             LocalTimeZone # BackgroundColor infoBackground #
             clockTooltip,
+        cpuBars,
         logtm cpu # cpuTooltip # OnClick "top.sh" #LinearTime # RefreshRate 0.02,
 
         title # LeftPadding 2 # RightPadding 2 #
@@ -232,6 +234,7 @@ data Widget = Clock   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, fmt_
           | Graph   {attr_ :: WidgetAttributes, graph_ :: GraphDef, graphColorTable :: [String], refreshRate_ :: Period}
           | BatteryStatus   {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, batteryName_ :: String, refreshRate_ :: Period }
           | BatteryRate     {attr_ :: WidgetAttributes, tattr_ :: TextAttributes, batteryName_ :: String, refreshRate_ :: Period }
+          | CpuBars   {attr_ :: WidgetAttributes, graphColorTable :: [String], refreshRate_ :: Period}
           | Trayer  {attr_ :: WidgetAttributes}
           deriving (Show, Eq)
 
@@ -246,6 +249,8 @@ clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone 1
 
 cpu :: Widget
 cpu = Graph defaultAttr (GraphDef Cpu (LogTime 8) Always) ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 1 -- # Width 129
+
+cpuBars = CpuBars defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 0.1
 
 mem :: Widget
 mem = Graph defaultAttr (GraphDef Mem (LogTime 8) Always) ["#00FF00", "#6060FF"] 1 -- # Width 129
@@ -679,7 +684,8 @@ data Updater = ClockUpdater String TimeConv TextPublisher
              | CpuTopUpdater (UTCTime, M.Map String (String, Int)) TextPublisher
              | MemStatusUpdater TextPublisher
              | BatteryStatusUpdater String TextPublisher
-             | BatteryRateUpdater String TextPublisher deriving (Generic, NFData)
+             | BatteryRateUpdater String TextPublisher
+             | CpuBarsUpdater [[[Int]]] (Publisher GraphData) deriving (Generic, NFData)
 type UpdaterDef = (Updater, Period)
 
 publish :: Publisher a -> a -> IO ()
@@ -696,6 +702,22 @@ loadavg :: IO String
 loadavg = foldl (\a b -> a++" "++b) "Load avg: " . take 3 . words <$> readFully "/proc/loadavg"
 
 update _ u@(ClockUpdater fmt conv p) = stateless u p $ (:[]) <$> formatClock fmt conv
+
+update _ u@(CpuBarsUpdater prevSamples publisher) = do
+   values <- map (map read . tail) . takeWhile (isPrefixOf "cpu" . head) . map words . tail . lines <$> readFully "/proc/stat"
+   let total = map sum values
+   let idle = map (!! 3) values
+   let busy = zipWith (-) total idle
+   let toArr a b = [a, b]
+   let newSample = zipWith toArr busy idle
+   let samples = newSample : prevSamples
+   let (prevSamples', prev) = splitAt 20 samples
+   -- print $ "prevSamples'" ++ show prevSamples
+   let graph = sort $ zipWith (zipWith (-)) newSample (head $ prev ++ prevSamples ++ [newSample])
+   -- print $ show graph
+   publish publisher $ LinearGraph $ concatMap (replicate 5) graph
+   -- print $ "Updating "  ++ show (idle, busy)
+   return $ CpuBarsUpdater prevSamples' publisher
 
 update graphs u@(GraphUpdater key p) = stateless u p $ return $ snd . fromJust $ M.lookup key graphs
 
@@ -832,7 +854,7 @@ draw rs wd RepaintAll p@RefTitlePainter {textp_ = textp} = do
   (textp', rect) <- drawTextPainter rs wd textp [ title ]
   return (p{textp_ = textp', current_title_ = title}, rect)
 
-draw rs wd@Graph{} RepaintAll p@(RefGraphPainter refgraph _) = do
+draw rs wd RepaintAll p@(RefGraphPainter refgraph _) = do
   graphdata <- readIORef refgraph
   let colors = graphColorTable wd
       WidgetAttributes sz pos  _ bg _ _ = attr_ wd
@@ -1032,6 +1054,10 @@ makeWidget rs wd@Title {} = do
 makeWidget rs wd@(Graph attr (GraphDef typ tscale refresh_type) colors rate) = do
   refgraph <- newIORef $ LinearGraph [] -- placeholder
   makeUpdatingWidget rate RefGraphPainter refgraph $ GraphUpdater (GraphKey typ tscale rate)
+
+makeWidget rs wd@(CpuBars attr colors rate) = do
+  refgraph <- newIORef $ LinearGraph [] -- placeholder
+  makeUpdatingWidget rate RefGraphPainter refgraph $ CpuBarsUpdater []
 
 makeWidget rs wd@NetStatus { netdev_ = netdev, refreshRate_ = rate} = do
   let key = fst $ fromJust $ extractGraphInfo Always wd
