@@ -250,7 +250,7 @@ clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone 1
 cpu :: Widget
 cpu = Graph defaultAttr (GraphDef Cpu (LogTime 8) Always) ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 1 -- # Width 129
 
-cpuBars = CpuBars defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 0.1
+cpuBars = CpuBars defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 0.5
 
 mem :: Widget
 mem = Graph defaultAttr (GraphDef Mem (LogTime 8) Always) ["#00FF00", "#6060FF"] 1 -- # Width 129
