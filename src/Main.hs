@@ -132,10 +132,10 @@ clockTooltip = Tooltip tooltipBackground (Size 560 (barHeight * 5)) Vertical [
 
 cpuTooltip :: Tooltip
 cpuTooltip = Tooltip tooltipBackground (Size 600 (8*barHeight)) Horizontal [
-     tooltip cpu #RefreshRate 0.05 #LinearTime #Width 100
+     tooltip cpuBase #RefreshRate 0.05 #LinearTime #Width 100
                    #BottomPadding 1 #RightPadding 1 # LeftPadding 1
                    #Width 100 #Refresh WhenVisible,
-     tooltip cpu #RefreshRate 1 #LinearTime #Width 200
+     tooltip cpuBase #RefreshRate 1 #LinearTime #Width 200
                    #BottomPadding 1 #RightPadding 1 # LeftPadding 1,
      tooltipText cpuTop #Width 300
      ]
@@ -249,9 +249,10 @@ clock :: Widget
 clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone 1
 
 cpu :: Widget
-cpu = Graph defaultAttr (GraphDef Cpu (LogTime 8) Always)
+cpu = cpuBase # cpuTooltip # OnClick "top.sh"
+
+cpuBase = Graph defaultAttr (GraphDef Cpu (LogTime 8) Always)
        ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 1 -- # Width 129
-       # cpuTooltip # OnClick "top.sh"
 
 cpuBars = CpuBars defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 0.5
        # cpuTooltip # OnClick "top.sh"
