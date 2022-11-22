@@ -10,6 +10,7 @@ import Control.Monad.Loops
 import Data.Bits
 import Data.IORef
 import Data.List
+import Data.List.Extra
 import Data.Map ((!))
 import Data.Maybe
 import Data.Time
@@ -250,7 +251,7 @@ clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone 1
 cpu :: Widget
 cpu = Graph defaultAttr (GraphDef Cpu (LogTime 8) Always) ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 1 -- # Width 129
 
-cpuBars = CpuBars defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 0.1
+cpuBars = CpuBars defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 0.5
 
 mem :: Widget
 mem = Graph defaultAttr (GraphDef Mem (LogTime 8) Always) ["#00FF00", "#6060FF"] 1 -- # Width 129
@@ -712,9 +713,10 @@ update _ u@(CpuBarsUpdater prevSamples publisher) = do
    let toArr a b = [a, b]
    let newSample = zipWith toArr busy idle
    let samples = newSample : prevSamples
-   let (prevSamples', prev) = splitAt 20 samples
+   let (prevSamples', tailSamples) = splitAt 10 samples
+   let prevSample = headDef (headDef newSample prevSamples) tailSamples
    -- print $ "prevSamples'" ++ show prevSamples
-   let graph = sort $ zipWith (zipWith (-)) newSample (head $ prev ++ prevSamples ++ [newSample])
+   let graph = sort $ zipWith (zipWith (-)) newSample prevSample
    -- print $ show graph
    publish publisher $ LinearGraph $ concatMap (replicate 5) graph
    -- print $ "Updating "  ++ show (idle, busy)
@@ -1330,7 +1332,16 @@ makeTitleThread rs = do
 
 initMainState graphs titleRef = do
   dpy <- openDisplay ""
-  (wins, updaters) <- unzip . catMaybes <$> mapM (makeBar dpy titleRef) bars
+  (wins0, updaters0) <- unzip . catMaybes <$> mapM (makeBar dpy titleRef) bars
+  (wins, updaters) <- if null wins0
+      then do
+          print "No Xinerama, fallback to DefaultScreen"
+          let (Bar bg barH _ gravity widgets) = head bars
+          (win, updater) <- fromJust <$> makeBar dpy titleRef (Bar bg barH DefaultScreen gravity widgets)
+          return ([win], [updater])
+      else
+        return (wins0, updaters0)
+      
   graphs' <- changeGraphs graphs wins
   ref <- newIORef (0, graphs', concat updaters, [])
   titleTid <- makeTitleThread $ aRs wins
