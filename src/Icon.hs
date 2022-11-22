@@ -4,7 +4,8 @@ module Icon (
   IconCache,
   makeIconCache,
   loadIconImage,
-  getIconImage
+  getIconImage,
+  scaleSimple
   ) where
 
 import Data.Maybe

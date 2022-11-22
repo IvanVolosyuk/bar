@@ -80,7 +80,7 @@ bar1 = Bar barBackground barHeight (XineramaScreen 0) GravityTop [
               # LocalTimeZone # BackgroundColor infoBackground
               # clockTooltip,
         cpuBars,
-        logtm cpu # cpuTooltip # OnClick "top.sh",
+        logtm cpu,
         logtm mem # memTooltip,
         logtm (net "eth0"),
         logtm (net "brkvm"),
@@ -102,7 +102,7 @@ bar2 = Bar barBackground barHeight (XineramaScreen 1) GravityTop [
             LocalTimeZone # BackgroundColor infoBackground #
             clockTooltip,
         cpuBars,
-        logtm cpu # cpuTooltip # OnClick "top.sh" #LinearTime # RefreshRate 1,
+        logtm cpu #LinearTime # RefreshRate 1,
 
         title # LeftPadding 2 # RightPadding 2 #
                 BackgroundColor barBackground #
@@ -249,9 +249,12 @@ clock :: Widget
 clock = Clock defaultAttr defaultTAttr "%R" LocalTimeZone 1
 
 cpu :: Widget
-cpu = Graph defaultAttr (GraphDef Cpu (LogTime 8) Always) ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 1 -- # Width 129
+cpu = Graph defaultAttr (GraphDef Cpu (LogTime 8) Always)
+       ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 1 -- # Width 129
+       # cpuTooltip # OnClick "top.sh"
 
 cpuBars = CpuBars defaultAttr ["#70FF70", "#FF8080", "#F020F0", "#3030FF"] 0.5
+       # cpuTooltip # OnClick "top.sh"
 
 mem :: Widget
 mem = Graph defaultAttr (GraphDef Mem (LogTime 8) Always) ["#00FF00", "#6060FF"] 1 -- # Width 129
@@ -687,7 +690,7 @@ data Updater = ClockUpdater String TimeConv TextPublisher
              | MemStatusUpdater TextPublisher
              | BatteryStatusUpdater String TextPublisher
              | BatteryRateUpdater String TextPublisher
-             | CpuBarsUpdater [[[Int]]] (Publisher GraphData) deriving (Generic, NFData)
+             | CpuBarsUpdater Int [[[Int]]] (Publisher GraphData) deriving (Generic, NFData)
 type UpdaterDef = (Updater, Period)
 
 publish :: Publisher a -> a -> IO ()
@@ -705,7 +708,7 @@ loadavg = foldl (\a b -> a++" "++b) "Load avg: " . take 3 . words <$> readFully 
 
 update _ u@(ClockUpdater fmt conv p) = stateless u p $ (:[]) <$> formatClock fmt conv
 
-update _ u@(CpuBarsUpdater prevSamples publisher) = do
+update _ u@(CpuBarsUpdater ws prevSamples publisher) = do
    values <- map (map read . tail) . takeWhile (isPrefixOf "cpu" . head) . map words . tail . lines <$> readFully "/proc/stat"
    let total = map sum values
    let idle = map (!! 3) values
@@ -718,9 +721,9 @@ update _ u@(CpuBarsUpdater prevSamples publisher) = do
    -- print $ "prevSamples'" ++ show prevSamples
    let graph = sort $ zipWith (zipWith (-)) newSample prevSample
    -- print $ show graph
-   publish publisher $ LinearGraph $ concatMap (replicate 5) graph
+   publish publisher $ LinearGraph (scaleSimple (length graph) ws graph)
    -- print $ "Updating "  ++ show (idle, busy)
-   return $ CpuBarsUpdater prevSamples' publisher
+   return $ CpuBarsUpdater ws prevSamples' publisher
 
 update graphs u@(GraphUpdater key p) = stateless u p $ return $ snd . fromJust $ M.lookup key graphs
 
@@ -1059,8 +1062,11 @@ makeWidget rs wd@(Graph attr (GraphDef typ tscale refresh_type) colors rate) = d
   makeUpdatingWidget rate RefGraphPainter refgraph $ GraphUpdater (GraphKey typ tscale rate)
 
 makeWidget rs wd@(CpuBars attr colors rate) = do
+  let Size ws _ =  size attr
+  -- Using padding as margin :()
+  let Padding (Size px _) _ =  padding attr
   refgraph <- newIORef $ LinearGraph [] -- placeholder
-  makeUpdatingWidget rate RefGraphPainter refgraph $ CpuBarsUpdater []
+  makeUpdatingWidget rate RefGraphPainter refgraph $ CpuBarsUpdater (ws - px) []
 
 makeWidget rs wd@NetStatus { netdev_ = netdev, refreshRate_ = rate} = do
   let key = fst $ fromJust $ extractGraphInfo Always wd
